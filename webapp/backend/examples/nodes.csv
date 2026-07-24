@@ -1,0 +1,8 @@
+diagram_id,node_id,parent_id,entity_type,label,rank_hint,order_hint,w_override,h_override,fill_override,metadata
+D2,F1,,start_end,Start,1,1,,,,
+D2,F2,,process,Receive Purchase Order,2,1,,,,
+D2,F3,,decision,Budget Approved?,3,1,,,,
+D2,F4,,process,Process Payment,4,1,,,,
+D2,F5,,process,Notify Requester of Rejection,4,2,,,,
+D2,F6,,data_io,Update ERP Record,5,1,,,,
+D2,F7,,start_end,End,6,1,,,,

@@ -1,0 +1,323 @@
+import axios from "axios";
+
+// ---------- core entities ----------
+export interface NodeOut {
+  id: string;
+  label: string;
+  type: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  parent?: string | null;
+  rank_hint: number;
+  order_hint: number;
+  w_override?: number | null;
+  h_override?: number | null;
+  fill_override: string;
+  stroke_override: string;
+  metadata: string;
+}
+
+export interface EdgeOut {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  relation: string;
+  waypoint_hint: string;
+  source_port: string;
+  target_port: string;
+}
+
+export interface ConnectionOut {
+  edge_id: string;
+  other_id: string;
+  other_label: string;
+  label: string;
+  dir: "in" | "out";
+}
+
+export interface DiagramInfo {
+  id: string;
+  title: string;
+  node_count: number;
+}
+
+export interface ShapeOut {
+  entity_type: string;
+  family: string;
+  shape: string;
+  fill: string;
+  stroke: string;
+  auto: string;
+  default_w: number;
+  default_h: number;
+  min_w: number;
+  min_h: number;
+}
+
+export interface LineOut {
+  relation_type: string;
+  family: string;
+  style: string;
+  width: number;
+  source_end: string;
+  target_end: string;
+  routing: string;
+  label_pos: string;
+  color: string;
+}
+
+export interface DiagramResponse {
+  session_id: string;
+  diagram_id: string;
+  title: string;
+  direction: string;
+  svg: string;
+  drawio: string;
+  html: string;
+  canvas_w: number;
+  canvas_h: number;
+  nodes: NodeOut[];
+  edges: EdgeOut[];
+  connections: Record<string, ConnectionOut[]>;
+  diagrams: DiagramInfo[];
+  shapes: ShapeOut[];
+  lines: LineOut[];
+  style_rules: string;
+  unknown_types: string[];
+}
+
+export interface PaletteResponse {
+  shapes: ShapeOut[];
+  lines: LineOut[];
+}
+
+export interface TemplateField {
+  key: string;
+  label: string;
+  default: string;
+}
+
+export interface TemplateInfo {
+  description: string;
+  fields: TemplateField[];
+}
+
+export type TemplatesResponse = Record<string, TemplateInfo>;
+
+// In dev, Vite proxies /api -> the FastAPI backend (see vite.config.ts).
+// In prod, point VITE_API_BASE at wherever the backend is deployed.
+const client = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE || "/api",
+});
+
+// ---------- load / bootstrap ----------
+export async function listSamples(): Promise<string[]> {
+  const r = await client.get<string[]>("/samples");
+  return r.data;
+}
+
+export async function getPalette(): Promise<PaletteResponse> {
+  const r = await client.get<PaletteResponse>("/palette");
+  return r.data;
+}
+
+export async function loadSample(name: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/sample", { name });
+  return r.data;
+}
+
+export async function uploadWorkbook(file: File): Promise<DiagramResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await client.post<DiagramResponse>("/upload", fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return r.data;
+}
+
+export async function createBlank(title?: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/blank", { title });
+  return r.data;
+}
+
+// ---------- multi-diagram ----------
+export async function listDiagrams(sessionId: string): Promise<DiagramInfo[]> {
+  const r = await client.get<DiagramInfo[]>(`/diagram/${sessionId}/list`);
+  return r.data;
+}
+
+export async function switchDiagram(sessionId: string, diagramId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/diagram/switch", {
+    session_id: sessionId,
+    diagram_id: diagramId,
+  });
+  return r.data;
+}
+
+// ---------- node/edge mutation ----------
+export async function reposition(sessionId: string, nodeId: string, x: number, y: number): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/reposition", {
+    session_id: sessionId,
+    node_id: nodeId,
+    x,
+    y,
+  });
+  return r.data;
+}
+
+export async function createNode(
+  sessionId: string,
+  entityType: string,
+  opts: { label?: string; parent?: string; x?: number; y?: number } = {}
+): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/node/create", {
+    session_id: sessionId,
+    entity_type: entityType,
+    label: opts.label || "",
+    parent: opts.parent || "",
+    x: opts.x ?? 100,
+    y: opts.y ?? 100,
+  });
+  return r.data;
+}
+
+export interface NodeUpdatePatch {
+  label?: string;
+  entity_type?: string;
+  fill_override?: string;
+  stroke_override?: string;
+  metadata?: string;
+}
+
+export async function updateNode(sessionId: string, nodeId: string, patch: NodeUpdatePatch): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/node/update", {
+    session_id: sessionId,
+    node_id: nodeId,
+    ...patch,
+  });
+  return r.data;
+}
+
+export async function deleteNode(sessionId: string, nodeId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/node/delete", { session_id: sessionId, node_id: nodeId });
+  return r.data;
+}
+
+export async function duplicateNode(sessionId: string, nodeId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/node/duplicate", { session_id: sessionId, node_id: nodeId });
+  return r.data;
+}
+
+export async function reparentNode(sessionId: string, nodeId: string, parent: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/node/reparent", {
+    session_id: sessionId,
+    node_id: nodeId,
+    parent,
+  });
+  return r.data;
+}
+
+export async function createEdge(
+  sessionId: string,
+  sourceId: string,
+  targetId: string,
+  relationType: string,
+  label = ""
+): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/edge/create", {
+    session_id: sessionId,
+    source_id: sourceId,
+    target_id: targetId,
+    relation_type: relationType,
+    label,
+  });
+  return r.data;
+}
+
+export interface EdgeUpdatePatch {
+  relation_type?: string;
+  label?: string;
+  reverse?: boolean;
+}
+
+export async function updateEdge(sessionId: string, edgeId: string, patch: EdgeUpdatePatch): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/edge/update", {
+    session_id: sessionId,
+    edge_id: edgeId,
+    ...patch,
+  });
+  return r.data;
+}
+
+export async function deleteEdge(sessionId: string, edgeId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/edge/delete", { session_id: sessionId, edge_id: edgeId });
+  return r.data;
+}
+
+// ---------- layout / history ----------
+export async function autoArrange(sessionId: string, direction?: "TB" | "LR"): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/auto-arrange", { session_id: sessionId, direction });
+  return r.data;
+}
+
+export async function undo(sessionId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/undo", { session_id: sessionId });
+  return r.data;
+}
+
+export async function redo(sessionId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/redo", { session_id: sessionId });
+  return r.data;
+}
+
+// ---------- CSV / templates / outline ----------
+export async function applyCsv(
+  sessionId: string,
+  nodesCsv: string,
+  edgesCsv = "",
+  shapesCsv = "",
+  linesCsv = ""
+): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/csv/apply", {
+    session_id: sessionId,
+    nodes_csv: nodesCsv,
+    edges_csv: edgesCsv,
+    shapes_csv: shapesCsv,
+    lines_csv: linesCsv,
+  });
+  return r.data;
+}
+
+export async function listTemplates(): Promise<TemplatesResponse> {
+  const r = await client.get<TemplatesResponse>("/templates");
+  return r.data;
+}
+
+export async function generateTemplate(templateName: string, params: Record<string, string>): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/template/generate", {
+    template_name: templateName,
+    params,
+  });
+  return r.data;
+}
+
+export async function generateOutline(text: string, entityType: string, relationType: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/outline/generate", {
+    text,
+    entity_type: entityType,
+    relation_type: relationType,
+  });
+  return r.data;
+}
+
+// ---------- style rules ----------
+export async function setStyleRules(sessionId: string, rulesText: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/style-rules", {
+    session_id: sessionId,
+    rules_text: rulesText,
+  });
+  return r.data;
+}

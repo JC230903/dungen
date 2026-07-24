@@ -1,0 +1,8 @@
+diagram_id,edge_id,source_id,target_id,relation_type,label,waypoint_hint,notes
+D2,e7,F1,F2,sequence_flow,,,
+D2,e8,F2,F3,sequence_flow,,,
+D2,e9,F3,F4,sequence_flow,Yes,,Approved branch
+D2,e10,F3,F5,sequence_flow,No,route:right,Rejected branch
+D2,e11,F4,F6,sequence_flow,,,
+D2,e12,F6,F7,sequence_flow,,,
+D2,e13,F5,F7,sequence_flow,,route:right,Merge to end
