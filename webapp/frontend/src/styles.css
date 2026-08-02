@@ -7,6 +7,27 @@ body {
 }
 .app { display: flex; flex-direction: column; height: 100vh; }
 
+.login-screen {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f6f7f9;
+}
+.login-card {
+  width: 320px;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+.login-card .brand { font-size: 20px; margin-bottom: 4px; }
+.login-card .btn-primary { margin-top: 8px; }
+.login-card .error { margin-bottom: 8px; }
+
 .topbar {
   display: flex;
   align-items: center;
@@ -27,6 +48,32 @@ body {
 .btn:hover { background: #f0f4fb; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .topbar .title { margin-left: auto; font-size: 13px; color: #555; }
+.user-badge { font-size: 12px; color: #555; font-weight: 600; }
+.saved-label { font-size: 11px; color: #2a7d46; }
+
+.shortcuts-help { position: relative; }
+.shortcuts-backdrop { position: fixed; inset: 0; z-index: 20; }
+.shortcuts-popover {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  z-index: 21;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 12px 14px;
+  width: 300px;
+}
+.shortcuts-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+.shortcuts-popover table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.shortcuts-popover td { padding: 4px 0; vertical-align: top; }
+.shortcut-key {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  color: #4472C4;
+  white-space: nowrap;
+  padding-right: 10px !important;
+}
 .topbar .error { color: #b3261e; font-size: 12px; max-width: 320px; }
 
 .sep { width: 1px; align-self: stretch; background: #e2e2e2; margin: 0 2px; }
@@ -132,6 +179,18 @@ body {
   filter: drop-shadow(0 0 3px #4472C4) drop-shadow(0 0 6px #4472C4);
 }
 
+.empty-card {
+  width: 360px;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  border-radius: 10px;
+  padding: 24px;
+}
+.empty-card h2 { margin: 0 0 4px; font-size: 16px; }
+.empty-actions { display: flex; gap: 8px; margin: 14px 0; }
+.empty-actions .btn { flex: 1; }
+.empty-tip { margin-top: 14px; }
+
 .empty-state {
   height: 100%;
   display: flex;
@@ -232,6 +291,22 @@ body {
 
 .panel h3 { margin: 0 0 6px; font-size: 14px; }
 .hint { color: #888; font-size: 12px; }
+.project-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.project-list li {
+  border: 1px solid #e6e6e6;
+  border-radius: 6px;
+  padding: 4px 4px 4px 8px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.project-list li.active { border-color: #4472C4; background: #f5f8fe; }
+.project-row-main { flex: 1; display: flex; justify-content: space-between; align-items: baseline; cursor: pointer; min-width: 0; }
+.project-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-time { color: #888; flex-shrink: 0; margin-left: 8px; }
+.project-delete { padding: 2px 8px; }
+
 .conn-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .conn-list li {
   border: 1px solid #e6e6e6;

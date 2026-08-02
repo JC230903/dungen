@@ -36,6 +36,7 @@ class Session:
     undo_stacks: dict = field(default_factory=dict)   # diagram_id -> [(nodes, edges), ...]
     redo_stacks: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    last_active: float = field(default_factory=time.time)
 
     @property
     def diagram(self) -> Diagram:
@@ -94,11 +95,14 @@ class DiagramStore:
 
     def get(self, session_id: str) -> Optional[Session]:
         self._gc()
-        return self._sessions.get(session_id)
+        session = self._sessions.get(session_id)
+        if session is not None:
+            session.last_active = time.time()
+        return session
 
     def _gc(self):
         cutoff = time.time() - self.ttl_seconds
-        stale = [sid for sid, s in self._sessions.items() if s.created_at < cutoff]
+        stale = [sid for sid, s in self._sessions.items() if s.last_active < cutoff]
         for sid in stale:
             self._sessions.pop(sid, None)
 

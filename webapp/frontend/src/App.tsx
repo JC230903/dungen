@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DiagramResponse } from "./api";
+import type { DiagramResponse, ProjectInfo } from "./api";
 import {
   autoArrange,
   createBlank,
@@ -7,15 +7,23 @@ import {
   createNode,
   deleteEdge,
   deleteNode,
+  deleteProject,
   duplicateNode,
   generateOutline,
   generateTemplate,
   applyCsv,
+  getToken,
+  listProjects,
+  loadProject,
   loadSample,
+  me,
+  onUnauthorized,
   redo,
   reparentNode,
   reposition as apiReposition,
+  saveProject,
   setStyleRules,
+  setToken,
   switchDiagram,
   undo,
   updateEdge,
@@ -30,9 +38,12 @@ import CsvPanel from "./components/CsvPanel";
 import TemplatesPanel from "./components/TemplatesPanel";
 import OutlinePanel from "./components/OutlinePanel";
 import StyleRulesPanel from "./components/StyleRulesPanel";
+import ProjectsPanel from "./components/ProjectsPanel";
+import LoginScreen from "./components/LoginScreen";
+import EmptyState from "./components/EmptyState";
 import "./styles.css";
 
-type SidebarTab = "properties" | "palette" | "csv" | "templates" | "outline" | "style";
+type SidebarTab = "properties" | "palette" | "csv" | "templates" | "outline" | "style" | "projects";
 
 function download(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
@@ -51,7 +62,7 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || e.isContentEditable;
 }
 
-export default function App() {
+function DiagramApp({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [diagram, setDiagram] = useState<DiagramResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -61,18 +72,40 @@ export default function App() {
   const [tool, setTool] = useState<Tool>("select");
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<SidebarTab>("properties");
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState<string>("");
+  const [autosaveAt, setAutosaveAt] = useState<number | null>(null);
   const diagramRef = useRef(diagram);
   diagramRef.current = diagram;
 
   const handleErr = (e: any) =>
     setError(e?.response?.data?.detail || e.message || "Request failed");
 
-  const runLoad = useCallback((p: Promise<DiagramResponse>) => {
+  const refreshProjects = useCallback(() => {
+    listProjects().then(setProjects).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
+
+  // `after` fires once the new diagram is in state — used by project-load to
+  // re-attach the project id/name once loading actually succeeds.
+  const runLoad = useCallback((p: Promise<DiagramResponse>, after?: (d: DiagramResponse) => void) => {
     setLoading(true);
     setError(null);
     setSelectedNodeIds([]);
     setSelectedEdgeId(null);
-    p.then(setDiagram).catch(handleErr).finally(() => setLoading(false));
+    setCurrentProjectId(null);
+    setCurrentProjectName("");
+    setAutosaveAt(null);
+    p.then((d) => {
+      setDiagram(d);
+      after?.(d);
+    })
+      .catch(handleErr)
+      .finally(() => setLoading(false));
   }, []);
 
   const runMutate = useCallback(
@@ -100,6 +133,91 @@ export default function App() {
       runLoad(switchDiagram(diagram.session_id, id));
     },
     [diagram, runLoad]
+  );
+
+  // ---------- saved projects ----------
+  const onLoadProject = useCallback(
+    (id: string, name: string) => {
+      runLoad(loadProject(id), () => {
+        setCurrentProjectId(id);
+        setCurrentProjectName(name);
+        setAutosaveAt(Date.now());
+      });
+    },
+    [runLoad]
+  );
+
+  const doSave = useCallback(
+    (name: string, projectId: string | null, silent = false) => {
+      if (!diagram) return;
+      if (!silent) {
+        setBusy(true);
+        setError(null);
+      }
+      saveProject(diagram.session_id, name, projectId)
+        .then((info) => {
+          setCurrentProjectId(info.id);
+          setCurrentProjectName(info.name);
+          setAutosaveAt(Date.now());
+          refreshProjects();
+        })
+        .catch((e) => {
+          // Autosave failing quietly (e.g. a transient network blip) shouldn't
+          // interrupt someone mid-edit with an error banner — explicit Save
+          // still surfaces failures normally.
+          if (silent) console.warn("autosave failed:", e);
+          else handleErr(e);
+        })
+        .finally(() => {
+          if (!silent) setBusy(false);
+        });
+    },
+    [diagram, refreshProjects]
+  );
+
+  const onSaveProject = useCallback((name: string) => doSave(name, currentProjectId), [doSave, currentProjectId]);
+  const onSaveProjectAsCopy = useCallback((name: string) => doSave(name, null), [doSave]);
+
+  // ---------- auto-save ----------
+  // While the open diagram is tied to a saved project, silently re-save it
+  // every 2 minutes so a crash/restart doesn't lose more than that much
+  // work — on top of, not instead of, the explicit Save button.
+  const AUTOSAVE_INTERVAL_MS = 2 * 60 * 1000;
+  const currentProjectIdRef = useRef(currentProjectId);
+  currentProjectIdRef.current = currentProjectId;
+  const currentProjectNameRef = useRef(currentProjectName);
+  currentProjectNameRef.current = currentProjectName;
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const pid = currentProjectIdRef.current;
+      if (pid) doSave(currentProjectNameRef.current, pid, true);
+    }, AUTOSAVE_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [doSave]);
+
+  const onQuickSave = useCallback(() => {
+    if (currentProjectId) {
+      onSaveProject(currentProjectName);
+      return;
+    }
+    const name = window.prompt("Save as:", diagram?.title || "Untitled");
+    if (name && name.trim()) onSaveProject(name.trim());
+  }, [currentProjectId, currentProjectName, diagram, onSaveProject]);
+
+  const onDeleteProject = useCallback(
+    (id: string) => {
+      deleteProject(id)
+        .then(() => {
+          if (id === currentProjectId) {
+            setCurrentProjectId(null);
+            setCurrentProjectName("");
+          }
+          refreshProjects();
+        })
+        .catch(handleErr);
+    },
+    [currentProjectId, refreshProjects]
   );
 
   // ---------- selection ----------
@@ -362,6 +480,11 @@ export default function App() {
         onSetTool={setTool}
         onSearchChange={setSearch}
         onDownload={onDownload}
+        hasSavedProject={!!currentProjectId}
+        onQuickSave={onQuickSave}
+        lastSavedAt={autosaveAt}
+        username={username}
+        onLogout={onLogout}
       />
       <div className="body">
         <div className="canvas-area">
@@ -383,9 +506,7 @@ export default function App() {
               busy={busy}
             />
           ) : (
-            <div className="empty-state">
-              Upload a Nodes/Edges workbook, load a sample, or start a blank canvas to see it rendered here.
-            </div>
+            <EmptyState onBlank={onBlank} onSample={onSample} onUpload={onUpload} />
           )}
         </div>
         {diagram && (
@@ -399,6 +520,7 @@ export default function App() {
                   ["templates", "Templates"],
                   ["outline", "Outline"],
                   ["style", "Style rules"],
+                  ["projects", "Projects"],
                 ] as [SidebarTab, string][]
               ).map(([key, label]) => (
                 <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
@@ -433,9 +555,64 @@ export default function App() {
               <OutlinePanel shapes={diagram.shapes} lines={diagram.lines} onGenerate={onGenerateOutline} />
             )}
             {tab === "style" && <StyleRulesPanel rulesText={diagram.style_rules} onApply={onApplyStyleRules} />}
+            {tab === "projects" && (
+              <ProjectsPanel
+                projects={projects}
+                currentProjectId={currentProjectId}
+                currentName={currentProjectName || diagram.title}
+                busy={busy}
+                onSave={onSaveProject}
+                onSaveAsCopy={onSaveProjectAsCopy}
+                onLoad={onLoadProject}
+                onDelete={onDeleteProject}
+              />
+            )}
           </aside>
         )}
       </div>
     </div>
   );
+}
+
+// ---------- auth gate ----------
+// Wraps DiagramApp: validates any stored token on mount (a token can be
+// stale — expired, or the DB it was issued against got wiped), shows
+// LoginScreen otherwise, and drops back to LoginScreen on any 401 from the
+// API (onUnauthorized, wired in api.ts) rather than each caller handling it.
+export default function App() {
+  const [checked, setChecked] = useState(false);
+  const [user, setUser] = useState<{ username: string } | null>(null);
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      setChecked(true);
+      return;
+    }
+    me()
+      .then((u) => setUser(u))
+      .catch(() => setToken(null))
+      .finally(() => setChecked(true));
+  }, []);
+
+  useEffect(() => {
+    onUnauthorized.handler = () => setUser(null);
+    return () => {
+      onUnauthorized.handler = null;
+    };
+  }, []);
+
+  const onAuthed = useCallback((token: string, username: string) => {
+    setToken(token);
+    setUser({ username });
+  }, []);
+
+  const onLogout = useCallback(() => {
+    setToken(null);
+    setUser(null);
+  }, []);
+
+  if (!checked) return null;
+  if (!user) return <LoginScreen onAuthed={onAuthed} />;
+  return <DiagramApp key={user.username} username={user.username} onLogout={onLogout} />;
 }

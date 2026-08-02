@@ -14,13 +14,15 @@ from __future__ import annotations
 import copy
 import csv
 import io
+import os
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from diagen.spec import Spec
 from diagen.layout import layout, _shift
@@ -32,16 +34,75 @@ from diagen.templates import TEMPLATES, build_outline
 from diagen.model import Node, Edge
 
 from .diagram_store import store, Session
+from . import projects as project_store
+from . import auth as auth_store
+from .ratelimit import RateLimiter
 
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024   # .xlsx workbooks; generous, catches abuse not real files
+MAX_CSV_BYTES = 5 * 1024 * 1024       # per CSV-paste field
+MAX_PROJECT_NAME_LEN = 200
+MAX_PROJECTS_PER_USER = 500
+
 app = FastAPI(title="diagen API")
+
+# `FRONTEND_ORIGIN` (comma-separated) restricts CORS to real cross-origin
+# deployments — e.g. GCP Cloud Run, where frontend and backend are two
+# separate services on two separate URLs (see webapp/deploy-gcp/). Unset
+# (the default, and what webapp/deploy/ uses) falls back to wide-open,
+# which is low-risk there specifically because the browser only ever talks
+# to Caddy same-origin — Caddy forwards to this backend server-side, so no
+# real cross-origin browser request ever happens.
+_frontend_origins = [o.strip() for o in os.environ.get("FRONTEND_ORIGIN", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # local dev tool; tighten if you ever deploy this
+    allow_origins=_frontend_origins or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Paths reachable without a token. Everything else under /api/* requires
+# `Authorization: Bearer <token>` — see auth_middleware below.
+PUBLIC_API_PATHS = {"/api/health", "/api/auth/signup", "/api/auth/login"}
+
+_limiter = RateLimiter()
+
+
+def _client_ip(request: Request) -> str:
+    # Cloudflare Tunnel sets this to the real visitor IP; fall back for direct/local access.
+    return (
+        request.headers.get("cf-connecting-ip")
+        or (request.headers.get("x-forwarded-for", "").split(",")[0].strip())
+        or (request.client.host if request.client else "unknown")
+    )
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path != "/api/health":
+        ip = _client_ip(request)
+        # Tighter limit on auth endpoints — this is the brute-force-guessing surface.
+        if request.url.path.startswith("/api/auth/"):
+            allowed = _limiter.check(f"auth:{ip}", max_requests=20, window_seconds=60)
+        else:
+            allowed = _limiter.check(f"api:{ip}", max_requests=300, window_seconds=60)
+        if not allowed:
+            return JSONResponse({"detail": "Too many requests — slow down."}, status_code=429)
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in PUBLIC_API_PATHS:
+        header = request.headers.get("authorization", "")
+        token = header[7:] if header.lower().startswith("bearer ") else None
+        payload = auth_store.verify_token(token) if token else None
+        if payload is None:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        request.state.user_id = payload["user_id"]
+        request.state.username = payload["username"]
+    return await call_next(request)
 
 
 # ---------- schemas ----------
@@ -220,10 +281,10 @@ class SessionIdRequest(BaseModel):
 
 class CsvApplyRequest(BaseModel):
     session_id: str
-    nodes_csv: str
-    edges_csv: str = ''
-    shapes_csv: str = ''
-    lines_csv: str = ''
+    nodes_csv: str = Field(max_length=MAX_CSV_BYTES)
+    edges_csv: str = Field('', max_length=MAX_CSV_BYTES)
+    shapes_csv: str = Field('', max_length=MAX_CSV_BYTES)
+    lines_csv: str = Field('', max_length=MAX_CSV_BYTES)
 
 
 class TemplateRequest(BaseModel):
@@ -240,6 +301,42 @@ class OutlineRequest(BaseModel):
 class StyleRulesRequest(BaseModel):
     session_id: str
     rules_text: str
+
+
+class ProjectInfo(BaseModel):
+    id: str
+    name: str
+    created_at: float
+    updated_at: float
+
+
+class ProjectSaveRequest(BaseModel):
+    session_id: str
+    name: str = Field(min_length=1, max_length=MAX_PROJECT_NAME_LEN)
+    project_id: Optional[str] = None
+
+
+class ProjectIdRequest(BaseModel):
+    project_id: str
+
+
+class SignupRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    username: str
+
+
+class MeResponse(BaseModel):
+    username: str
 
 
 # ---------- helpers ----------
@@ -403,6 +500,34 @@ def _csv_rows(text: str) -> list[dict]:
     return list(csv.DictReader(io.StringIO(text)))
 
 
+# ---------- routes: auth ----------
+@app.post("/api/auth/signup", response_model=AuthResponse)
+def auth_signup(req: SignupRequest):
+    err = auth_store.validate_username(req.username) or auth_store.validate_password(req.password)
+    if err:
+        raise HTTPException(400, err)
+    try:
+        user = auth_store.create_user(req.username, req.password)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    token = auth_store.make_token(user["id"], user["username"])
+    return AuthResponse(token=token, username=user["username"])
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+def auth_login(req: LoginRequest):
+    user = auth_store.get_user_by_username(req.username)
+    if user is None or not auth_store.verify_password(req.password, user["salt"], user["pw_hash"]):
+        raise HTTPException(401, "Wrong username or password")
+    token = auth_store.make_token(user["id"], user["username"])
+    return AuthResponse(token=token, username=user["username"])
+
+
+@app.get("/api/auth/me", response_model=MeResponse)
+def auth_me(request: Request):
+    return MeResponse(username=request.state.username)
+
+
 # ---------- routes: load / bootstrap ----------
 @app.get("/api/health")
 def health():
@@ -449,7 +574,9 @@ def load_sample(req: SampleRequest):
 async def upload(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(400, "Please upload a .xlsx workbook")
-    raw = await file.read()
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)}MB)")
     try:
         spec = Spec(io.BytesIO(raw), use_defaults=True)
     except Exception as exc:  # bad workbook shape, missing sheet, etc.
@@ -733,3 +860,52 @@ def style_rules(req: StyleRulesRequest):
     session = _get_session(req.session_id)
     session.style_rules = req.rules_text
     return _build_response(session)
+
+
+# ---------- routes: saved projects (SQLite-backed, survives restarts) ----------
+# Every route here reads `request.state.user_id`, set by auth_middleware —
+# these paths are never in PUBLIC_API_PATHS, so it's always present.
+@app.get("/api/projects", response_model=list[ProjectInfo])
+def projects_list(request: Request):
+    return project_store.list_projects(request.state.user_id)
+
+
+@app.post("/api/projects/save", response_model=ProjectInfo)
+def projects_save(req: ProjectSaveRequest, request: Request):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(400, "Project name can't be empty")
+    user_id = request.state.user_id
+    session = _get_session(req.session_id)
+    if not req.project_id and project_store.count_projects(user_id) >= MAX_PROJECTS_PER_USER:
+        raise HTTPException(409, f"Saved-project limit reached ({MAX_PROJECTS_PER_USER})")
+    data = project_store.spec_to_dict(session.spec)
+    try:
+        pid = project_store.save_project(name, data, user_id, req.project_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    row = next(p for p in project_store.list_projects(user_id) if p["id"] == pid)
+    return ProjectInfo(**row)
+
+
+@app.post("/api/projects/load", response_model=DiagramResponse)
+def projects_load(req: ProjectIdRequest, request: Request):
+    project = project_store.get_project(req.project_id, request.state.user_id)
+    if project is None:
+        raise HTTPException(404, f"No such project: {req.project_id}")
+    try:
+        spec = project_store.spec_from_dict(project["data"])
+        active = _first_diagram_id(spec)
+        canvas_w, canvas_h = layout(spec.diagrams[active], spec)
+        session = store.put(spec, active, canvas_w, canvas_h)
+        return _build_response(session)
+    except (KeyError, ValueError) as exc:  # corrupt/old-format row, shouldn't happen but don't 500 opaquely
+        raise HTTPException(400, f"Could not load project: {exc}") from exc
+
+
+@app.post("/api/projects/delete")
+def projects_delete(req: ProjectIdRequest, request: Request):
+    deleted = project_store.delete_project(req.project_id, request.state.user_id)
+    if not deleted:
+        raise HTTPException(404, f"No such project: {req.project_id}")
+    return {"deleted": True}

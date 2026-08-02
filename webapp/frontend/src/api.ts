@@ -107,11 +107,71 @@ export interface TemplateInfo {
 
 export type TemplatesResponse = Record<string, TemplateInfo>;
 
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  created_at: number;
+  updated_at: number;
+}
+
 // In dev, Vite proxies /api -> the FastAPI backend (see vite.config.ts).
 // In prod, point VITE_API_BASE at wherever the backend is deployed.
 const client = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || "/api",
 });
+
+// ---------- auth ----------
+const TOKEN_KEY = "diagen_token";
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string | null) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+client.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
+// Fires on any 401 (expired/invalid token) — App listens for this to drop
+// back to the login screen instead of every caller having to check.
+export const onUnauthorized = { handler: null as (() => void) | null };
+
+client.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (err?.response?.status === 401) {
+      setToken(null);
+      onUnauthorized.handler?.();
+    }
+    return Promise.reject(err);
+  }
+);
+
+export interface AuthResponse {
+  token: string;
+  username: string;
+}
+
+export async function signup(username: string, password: string): Promise<AuthResponse> {
+  const r = await client.post<AuthResponse>("/auth/signup", { username, password });
+  return r.data;
+}
+
+export async function login(username: string, password: string): Promise<AuthResponse> {
+  const r = await client.post<AuthResponse>("/auth/login", { username, password });
+  return r.data;
+}
+
+export async function me(): Promise<{ username: string }> {
+  const r = await client.get<{ username: string }>("/auth/me");
+  return r.data;
+}
 
 // ---------- load / bootstrap ----------
 export async function listSamples(): Promise<string[]> {
@@ -320,4 +380,32 @@ export async function setStyleRules(sessionId: string, rulesText: string): Promi
     rules_text: rulesText,
   });
   return r.data;
+}
+
+// ---------- saved projects (SQLite-backed, survives restarts) ----------
+export async function listProjects(): Promise<ProjectInfo[]> {
+  const r = await client.get<ProjectInfo[]>("/projects");
+  return r.data;
+}
+
+export async function saveProject(
+  sessionId: string,
+  name: string,
+  projectId?: string | null
+): Promise<ProjectInfo> {
+  const r = await client.post<ProjectInfo>("/projects/save", {
+    session_id: sessionId,
+    name,
+    project_id: projectId || null,
+  });
+  return r.data;
+}
+
+export async function loadProject(projectId: string): Promise<DiagramResponse> {
+  const r = await client.post<DiagramResponse>("/projects/load", { project_id: projectId });
+  return r.data;
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await client.post("/projects/delete", { project_id: projectId });
 }

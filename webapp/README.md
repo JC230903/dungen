@@ -37,6 +37,37 @@ auto-layout recompute, rather than the JS playground's precise "resize only the 
 container, leave everyone else exactly where they were" behavior — Python's layout engine
 has no in-place container-resize primitive equivalent to that yet.
 
+## Accounts
+
+The app requires a login — real multi-user accounts (`app/auth.py`), not a shared
+password. Sign up from the app's own login screen; there's no separate admin bootstrap.
+Passwords are PBKDF2-HMAC-SHA256 hashed (stdlib `hashlib`, no `bcrypt`/`passlib`
+dependency). Every API route except `/api/health`, `/api/auth/signup`, and
+`/api/auth/login` requires `Authorization: Bearer <token>` — enforced by middleware in
+`app/main.py`, not per-route, so a route can't accidentally ship unauthenticated.
+Saved projects (below) are scoped per-user; nobody can list, load, or delete another
+user's saved diagrams. Editing *sessions* (the in-memory `Spec` behind a `session_id`)
+are not user-scoped — anyone with a valid token and a `session_id` can act on that
+session, matching the original design (a session is a short-lived editing handle, not a
+resource with an owner).
+
+## Saved projects
+
+Beyond the ephemeral, TTL'd editing session, a diagram can be explicitly **saved** as a
+named project (`app/projects.py`, SQLite at `webapp/backend/data/projects.db`) — survives
+backend restarts, reopen anytime from the Projects sidebar tab. The frontend also
+auto-saves every 2 minutes once a diagram is tied to a saved project, so a crash loses at
+most that much unsaved work. See `webapp/deploy/README.md` for the backup schedule.
+
+## Hardening
+
+- Per-IP rate limiting: 300 req/min general, 20 req/min on `/api/auth/*` (brute-force
+  guard on login/signup) — `app/ratelimit.py`, in-memory sliding window.
+- Upload cap 15MB, CSV-paste field cap 5MB, 500 saved projects per user, project names
+  capped at 200 chars — all return a clean 4xx, never an unbounded-memory 500.
+- Session TTL (1h, `app/diagram_store.py`) is based on last activity, not creation time —
+  an actively-edited session won't expire out from under you mid-edit.
+
 ## Run it
 
 **Backend**
@@ -57,7 +88,8 @@ npm run dev
 ```
 Open the URL Vite prints (usually `http://localhost:5173`). The dev server proxies
 `/api/*` to `http://127.0.0.1:8000` (see `vite.config.ts`), so there's no CORS setup
-needed locally.
+needed locally. First run: sign up an account from the login screen — there's no
+pre-seeded user.
 
 ## Production build
 ```bash
@@ -69,9 +101,19 @@ backend if it isn't reachable at `/api` in that environment.
 
 ## API
 
+All endpoints below except `/api/health`, `/api/auth/signup`, `/api/auth/login` require
+`Authorization: Bearer <token>` (see Accounts, above).
+
 | Endpoint | Method | Body | Notes |
 |---|---|---|---|
-| `/api/health` | GET | — | liveness check |
+| `/api/health` | GET | — | liveness check, no auth |
+| `/api/auth/signup` | POST | `{username, password}` | creates an account, returns `{token, username}`, no auth |
+| `/api/auth/login` | POST | `{username, password}` | returns `{token, username}`, no auth |
+| `/api/auth/me` | GET | — | `{username}` for the current token |
+| `/api/projects` | GET | — | this user's saved projects: `[{id, name, created_at, updated_at}]` |
+| `/api/projects/save` | POST | `{session_id, name, project_id?}` | insert new, or update in place if `project_id` is given and owned by you |
+| `/api/projects/load` | POST | `{project_id}` | starts a fresh session from a saved project (404 if not yours) |
+| `/api/projects/delete` | POST | `{project_id}` | 404 if not yours |
 | `/api/samples` | GET | — | bundled sample filenames |
 | `/api/palette` | GET | — | standalone default shape/line palette |
 | `/api/sample` | POST | `{name}` | load a bundled workbook |
@@ -100,5 +142,7 @@ Every mutating endpoint returns the full diagram payload (svg, drawio, html, nod
 connections, the session's diagrams/shapes/lines, style_rules) so the frontend always has
 a complete, consistent snapshot to render from.
 
-Sessions are kept in an in-memory, TTL'd dict (`app/diagram_store.py`) — fine for local
-use; swap for Redis if this ever needs to survive a backend restart or run multi-process.
+Editing sessions are kept in an in-memory, TTL'd dict (`app/diagram_store.py`, TTL
+tracked off last activity) — fine for local use; swap for Redis if this ever needs to
+survive a backend restart or run multi-process. Saved *projects* are durable (SQLite,
+see above) independent of session TTL.

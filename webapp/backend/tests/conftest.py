@@ -40,3 +40,33 @@ def template_spec():
     from diagen.spec import Spec
     assert TEMPLATE_XLSX.exists(), f'fixture workbook missing: {TEMPLATE_XLSX}'
     return Spec(TEMPLATE_XLSX)
+
+
+# ---------- FastAPI app (app/) fixtures ----------
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    """A TestClient wired to a throwaway SQLite DB + secret key per test —
+    never touches the real webapp/backend/data/projects.db. Also clears the
+    process-wide rate limiter and in-memory session store between tests so
+    one test's activity can't 429 or leak sessions into the next."""
+    from app import db as db_module
+    from app import auth as auth_store
+    from app import main as app_main
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(db_module, 'SQLITE_DB_PATH', tmp_path / 'projects.db')
+    monkeypatch.setattr(auth_store, 'SECRET_PATH', tmp_path / 'secret.key')
+    app_main._limiter._hits.clear()
+    app_main.store._sessions.clear()
+
+    with TestClient(app_main.app) as c:
+        yield c
+
+
+@pytest.fixture()
+def auth_headers(client):
+    """Signs up a fresh user, returns (client, headers) ready for authed calls."""
+    r = client.post('/api/auth/signup', json={'username': 'tester', 'password': 'correcthorse1'})
+    assert r.status_code == 200, r.text
+    token = r.json()['token']
+    return {'Authorization': f'Bearer {token}'}

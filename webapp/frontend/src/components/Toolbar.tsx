@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DiagramInfo } from "../api";
 import { listSamples } from "../api";
+import ShortcutsHelp from "./ShortcutsHelp";
 
 export type Tool = "select" | "connect";
 
@@ -26,6 +27,25 @@ interface Props {
   onSetTool: (tool: Tool) => void;
   onSearchChange: (s: string) => void;
   onDownload: (kind: "svg" | "drawio" | "html") => void;
+  hasSavedProject: boolean;
+  onQuickSave: () => void;
+  lastSavedAt: number | null;
+  username: string;
+  onLogout: () => void;
+}
+
+function useRelativeTime(ts: number | null): string | null {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (ts == null) return;
+    const id = setInterval(() => force((n) => n + 1), 15000);
+    return () => clearInterval(id);
+  }, [ts]);
+  if (ts == null) return null;
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (secs < 10) return "Saved just now";
+  if (secs < 60) return `Saved ${secs}s ago`;
+  return `Saved ${Math.round(secs / 60)}m ago`;
 }
 
 export default function Toolbar({
@@ -50,10 +70,16 @@ export default function Toolbar({
   onSetTool,
   onSearchChange,
   onDownload,
+  hasSavedProject,
+  onQuickSave,
+  lastSavedAt,
+  username,
+  onLogout,
 }: Props) {
   const [samples, setSamples] = useState<string[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const disabled = loading || busy;
+  const savedLabel = useRelativeTime(lastSavedAt);
 
   useEffect(() => {
     listSamples().then(setSamples).catch(() => setSamples([]));
@@ -151,6 +177,17 @@ export default function Toolbar({
           />
 
           <span className="sep" />
+          <button
+            className="btn btn-primary"
+            onClick={onQuickSave}
+            disabled={disabled}
+            title="Save to this machine's local database"
+          >
+            {hasSavedProject ? "Save" : "Save as…"}
+          </button>
+          {savedLabel && <span className="saved-label">{savedLabel}</span>}
+
+          <span className="sep" />
           <button className="btn" onClick={() => onDownload("svg")}>
             SVG
           </button>
@@ -165,6 +202,15 @@ export default function Toolbar({
 
       <div className="title">{loading ? "Loading…" : title || ""}</div>
       {error && <div className="error">{error}</div>}
+
+      <ShortcutsHelp />
+      <span className="sep" />
+      <span className="user-badge" title={username}>
+        {username}
+      </span>
+      <button className="btn" onClick={onLogout}>
+        Log out
+      </button>
     </div>
   );
 }

@@ -1,0 +1,14 @@
+# Used inside the Cloud Run frontend image only (webapp/frontend/Dockerfile)
+# — not the home-deploy Caddyfile (that one's webapp/deploy/Caddyfile and
+# also reverse-proxies /api to a co-located backend; this one doesn't,
+# frontend and backend are two separate Cloud Run services talking
+# cross-origin, wired via VITE_API_BASE at build time instead).
+{
+	admin off
+}
+
+:{$PORT} {
+	root * /srv
+	file_server
+	try_files {path} /index.html
+}

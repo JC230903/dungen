@@ -6,10 +6,17 @@ __pycache__/
 .venv/
 venv/
 
+# saved-project database + backups (runtime data, not source)
+webapp/backend/data/
+
 # Node
 node_modules/
 dist/
 .vite/
+
+# deploy (downloaded binaries + runtime logs, not source)
+webapp/deploy/bin/
+webapp/deploy/logs/
 
 # editors / OS
 .DS_Store
