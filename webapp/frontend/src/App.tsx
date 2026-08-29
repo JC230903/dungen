@@ -79,8 +79,21 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   const diagramRef = useRef(diagram);
   diagramRef.current = diagram;
 
-  const handleErr = (e: any) =>
-    setError(e?.response?.data?.detail || e.message || "Request failed");
+  const handleErr = (e: any) => {
+    const status = e?.response?.status;
+    const detail = e?.response?.data?.detail;
+    if (status && status >= 500) {
+      console.error("server error:", e);
+      setError("Something went wrong on the server. Try again — if it keeps happening, reload the page.");
+    } else if (detail) {
+      // 4xx details from the API are already written for a human (e.g. "Unknown entity_type: foo").
+      setError(detail);
+    } else if (e?.message === "Network Error") {
+      setError("Can't reach the server. Check your connection and try again.");
+    } else {
+      setError(e?.message || "That didn't work. Try again.");
+    }
+  };
 
   const refreshProjects = useCallback(() => {
     listProjects().then(setProjects).catch(() => {});
@@ -464,6 +477,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
         loading={loading}
         busy={busy}
         error={error}
+        onDismissError={() => setError(null)}
         diagrams={diagram?.diagrams ?? []}
         activeDiagramId={diagram?.diagram_id ?? ""}
         direction={diagram?.direction ?? "top-down"}
@@ -506,7 +520,13 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
               busy={busy}
             />
           ) : (
-            <EmptyState onBlank={onBlank} onSample={onSample} onUpload={onUpload} />
+            <EmptyState
+              onBlank={onBlank}
+              onSample={onSample}
+              onUpload={onUpload}
+              onGenerateTemplate={onGenerateTemplate}
+              onGenerateOutline={onGenerateOutline}
+            />
           )}
         </div>
         {diagram && (
@@ -549,7 +569,14 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
               />
             )}
             {tab === "palette" && <Palette shapes={diagram.shapes} onCreate={onCreateFromPalette} />}
-            {tab === "csv" && <CsvPanel unknownTypes={diagram.unknown_types} onApply={onApplyCsv} />}
+            {tab === "csv" && (
+              <CsvPanel
+                unknownTypes={diagram.unknown_types}
+                shapes={diagram.shapes}
+                lines={diagram.lines}
+                onApply={onApplyCsv}
+              />
+            )}
             {tab === "templates" && <TemplatesPanel onGenerate={onGenerateTemplate} />}
             {tab === "outline" && (
               <OutlinePanel shapes={diagram.shapes} lines={diagram.lines} onGenerate={onGenerateOutline} />

@@ -1,19 +1,37 @@
 import { useEffect, useRef, useState } from "react";
-import { listSamples } from "../api";
+import type { LineOut, ShapeOut } from "../api";
+import { getPalette, listSamples } from "../api";
+import TemplatesPanel from "./TemplatesPanel";
+import OutlinePanel from "./OutlinePanel";
 
 interface Props {
   onBlank: () => void;
   onSample: (name: string) => void;
   onUpload: (file: File) => void;
+  onGenerateTemplate: (templateName: string, params: Record<string, string>) => void;
+  onGenerateOutline: (text: string, entityType: string, relationType: string) => void;
 }
 
-export default function EmptyState({ onBlank, onSample, onUpload }: Props) {
+type Expanded = "template" | "outline" | null;
+
+export default function EmptyState({ onBlank, onSample, onUpload, onGenerateTemplate, onGenerateOutline }: Props) {
   const [samples, setSamples] = useState<string[]>([]);
+  const [expanded, setExpanded] = useState<Expanded>(null);
+  const [shapes, setShapes] = useState<ShapeOut[]>([]);
+  const [lines, setLines] = useState<LineOut[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     listSamples().then(setSamples).catch(() => setSamples([]));
+    getPalette()
+      .then((p) => {
+        setShapes(p.shapes);
+        setLines(p.lines);
+      })
+      .catch(() => {});
   }, []);
+
+  const toggle = (which: Expanded) => setExpanded((cur) => (cur === which ? null : which));
 
   return (
     <div className="empty-state">
@@ -41,6 +59,26 @@ export default function EmptyState({ onBlank, onSample, onUpload }: Props) {
           />
         </div>
 
+        <div className="empty-actions">
+          <button className={`btn ${expanded === "template" ? "active" : ""}`} onClick={() => toggle("template")}>
+            From a template
+          </button>
+          <button className={`btn ${expanded === "outline" ? "active" : ""}`} onClick={() => toggle("outline")}>
+            From an outline
+          </button>
+        </div>
+
+        {expanded === "template" && (
+          <div className="empty-expanded">
+            <TemplatesPanel onGenerate={onGenerateTemplate} />
+          </div>
+        )}
+        {expanded === "outline" && (
+          <div className="empty-expanded">
+            <OutlinePanel shapes={shapes} lines={lines} onGenerate={onGenerateOutline} />
+          </div>
+        )}
+
         {samples.length > 0 && (
           <label className="field">
             <span>Or load a sample workbook</span>
@@ -62,11 +100,6 @@ export default function EmptyState({ onBlank, onSample, onUpload }: Props) {
             </select>
           </label>
         )}
-
-        <p className="hint empty-tip">
-          Once a diagram's open, the sidebar also has Templates (parameterized generators) and
-          Outline (turn indented text into a mind map) as other starting points.
-        </p>
       </div>
     </div>
   );

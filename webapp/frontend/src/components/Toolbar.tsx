@@ -11,6 +11,7 @@ interface Props {
   loading: boolean;
   busy: boolean;
   error: string | null;
+  onDismissError: () => void;
   diagrams: DiagramInfo[];
   activeDiagramId: string;
   direction: string;
@@ -54,6 +55,7 @@ export default function Toolbar({
   loading,
   busy,
   error,
+  onDismissError,
   diagrams,
   activeDiagramId,
   direction,
@@ -88,44 +90,48 @@ export default function Toolbar({
   return (
     <div className="topbar">
       <div className="brand">diagen</div>
-      <button className="btn" onClick={() => fileRef.current?.click()} disabled={disabled}>
-        Upload .xlsx
-      </button>
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".xlsx"
-        hidden
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onUpload(f);
-          e.target.value = "";
-        }}
-      />
-      <select
-        defaultValue=""
-        disabled={disabled}
-        onChange={(e) => {
-          if (e.target.value) onSample(e.target.value);
-          e.target.value = "";
-        }}
-      >
-        <option value="" disabled>
-          Load a sample…
-        </option>
-        {samples.map((s) => (
-          <option key={s} value={s}>
-            {s}
+
+      <div className="toolbar-group" title="Start a new diagram from a source">
+        <button className="btn" onClick={() => fileRef.current?.click()} disabled={disabled}>
+          Upload .xlsx
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".xlsx"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onUpload(f);
+            e.target.value = "";
+          }}
+        />
+        <select
+          defaultValue=""
+          disabled={disabled}
+          onChange={(e) => {
+            if (e.target.value) onSample(e.target.value);
+            e.target.value = "";
+          }}
+        >
+          <option value="" disabled>
+            Load a sample…
           </option>
-        ))}
-      </select>
-      <button className="btn" onClick={onBlank} disabled={disabled}>
-        + Blank
-      </button>
+          {samples.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+        <button className="btn" onClick={onBlank} disabled={disabled}>
+          + Blank
+        </button>
+      </div>
 
       {hasDiagram && (
         <>
           <span className="sep" />
+
           {diagrams.length > 1 && (
             <select
               value={activeDiagramId}
@@ -141,33 +147,35 @@ export default function Toolbar({
             </select>
           )}
 
-          <div className="tool-toggle" role="group" title="V = select, C = connect">
-            <button className={tool === "select" ? "active" : ""} onClick={() => onSetTool("select")}>
-              Select
+          <div className="toolbar-group" title="Edit">
+            <div className="tool-toggle" role="group" title="V = select, C = connect">
+              <button className={tool === "select" ? "active" : ""} onClick={() => onSetTool("select")}>
+                Select
+              </button>
+              <button className={tool === "connect" ? "active" : ""} onClick={() => onSetTool("connect")}>
+                Connect
+              </button>
+            </div>
+
+            <div className="tool-toggle" title="Layout direction">
+              <button className={direction.startsWith("top") ? "active" : ""} onClick={() => onSetDirection("TB")}>
+                ↓ TB
+              </button>
+              <button className={direction.startsWith("left") ? "active" : ""} onClick={() => onSetDirection("LR")}>
+                → LR
+              </button>
+            </div>
+
+            <button className="btn" onClick={onAutoArrange} disabled={disabled} title="Re-run auto-layout">
+              Auto-arrange
             </button>
-            <button className={tool === "connect" ? "active" : ""} onClick={() => onSetTool("connect")}>
-              Connect
+            <button className="btn" onClick={onUndo} disabled={disabled} title="Ctrl+Z">
+              ↶ Undo
+            </button>
+            <button className="btn" onClick={onRedo} disabled={disabled} title="Ctrl+Y">
+              ↷ Redo
             </button>
           </div>
-
-          <div className="tool-toggle" title="Layout direction">
-            <button className={direction.startsWith("top") ? "active" : ""} onClick={() => onSetDirection("TB")}>
-              ↓ TB
-            </button>
-            <button className={direction.startsWith("left") ? "active" : ""} onClick={() => onSetDirection("LR")}>
-              → LR
-            </button>
-          </div>
-
-          <button className="btn" onClick={onAutoArrange} disabled={disabled} title="Re-run auto-layout">
-            Auto-arrange
-          </button>
-          <button className="btn" onClick={onUndo} disabled={disabled} title="Ctrl+Z">
-            ↶ Undo
-          </button>
-          <button className="btn" onClick={onRedo} disabled={disabled} title="Ctrl+Y">
-            ↷ Redo
-          </button>
 
           <input
             className="search-box"
@@ -177,31 +185,42 @@ export default function Toolbar({
           />
 
           <span className="sep" />
-          <button
-            className="btn btn-primary"
-            onClick={onQuickSave}
-            disabled={disabled}
-            title="Save to this machine's local database"
-          >
-            {hasSavedProject ? "Save" : "Save as…"}
-          </button>
-          {savedLabel && <span className="saved-label">{savedLabel}</span>}
+          <div className="toolbar-group" title="Save">
+            <button
+              className="btn btn-primary"
+              onClick={onQuickSave}
+              disabled={disabled}
+              title="Save to this machine's local database"
+            >
+              {hasSavedProject ? "Save" : "Save as…"}
+            </button>
+            {savedLabel && <span className="saved-label">{savedLabel}</span>}
+          </div>
 
           <span className="sep" />
-          <button className="btn" onClick={() => onDownload("svg")}>
-            SVG
-          </button>
-          <button className="btn" onClick={() => onDownload("drawio")}>
-            draw.io
-          </button>
-          <button className="btn" onClick={() => onDownload("html")}>
-            HTML
-          </button>
+          <div className="toolbar-group" title="Export">
+            <button className="btn" onClick={() => onDownload("svg")}>
+              SVG
+            </button>
+            <button className="btn" onClick={() => onDownload("drawio")}>
+              draw.io
+            </button>
+            <button className="btn" onClick={() => onDownload("html")}>
+              HTML
+            </button>
+          </div>
         </>
       )}
 
       <div className="title">{loading ? "Loading…" : title || ""}</div>
-      {error && <div className="error">{error}</div>}
+      {error && (
+        <div className="error">
+          {error}
+          <button className="error-dismiss" onClick={onDismissError} title="Dismiss">
+            ×
+          </button>
+        </div>
+      )}
 
       <ShortcutsHelp />
       <span className="sep" />
