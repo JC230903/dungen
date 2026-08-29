@@ -20,8 +20,11 @@ interface Props {
   busy: boolean;
 }
 
-const MIN_ZOOM = 0.15;
+// The engine happily emits canvases a few thousand pixels wide, so the floor has
+// to go low enough that "fit to screen" can actually show one end to end.
+const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 4;
+const FIT_PADDING = 24;
 
 /** Renders the backend-provided SVG string and layers interactivity on top of
  * it (click-to-highlight, drag-to-reposition, connect-tool, palette
@@ -299,18 +302,49 @@ export default function DiagramCanvas({
   }, [selectedNodeIds, selectedEdgeId, view, svg]);
 
   // ---------- pan / zoom ----------
-  const onWheel = (ev: React.WheelEvent) => {
-    ev.preventDefault();
-    const factor = Math.exp(-ev.deltaY * 0.001);
+  // The world is `translate(x, y) scale(s)` with origin 0 0, so a world point p
+  // sits at screen `xy + s*p`. Zooming therefore has to move `xy` as well, or the
+  // drawing slides out from under whatever the user was looking at.
+  const zoomAt = (factor: number, cx: number, cy: number) =>
     setView((v) => {
       const scale = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.scale * factor));
-      return { ...v, scale };
+      if (scale === v.scale) return v;
+      // keep the world point currently under (cx, cy) pinned there
+      return {
+        scale,
+        x: cx - (scale / v.scale) * (cx - v.x),
+        y: cy - (scale / v.scale) * (cy - v.y),
+      };
     });
-  };
 
-  const onBgPointerDown = (ev: React.PointerEvent) => {
-    if ((ev.target as Element).closest("[data-node-id]")) return;
-    panState.current = { startX: ev.clientX, startY: ev.clientY, origX: view.x, origY: view.y };
+  // Wheel is attached natively rather than via React's onWheel: React registers
+  // wheel listeners passively, so preventDefault() there is ignored (and logs a
+  // console warning) — which let the page itself scroll instead of the canvas.
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const rect = vp.getBoundingClientRect();
+      // Ctrl/Cmd + wheel is the zoom convention; a trackpad pinch also arrives
+      // as a wheel event with ctrlKey set, so both gestures land here.
+      if (ev.ctrlKey || ev.metaKey) {
+        zoomAt(Math.exp(-ev.deltaY * 0.002), ev.clientX - rect.left, ev.clientY - rect.top);
+        return;
+      }
+      // Otherwise scroll the canvas. Shift+wheel scrolls horizontally (the usual
+      // shortcut for mice with only a vertical wheel); trackpads send deltaX
+      // directly, so honour both.
+      const dx = ev.shiftKey ? ev.deltaY : ev.deltaX;
+      const dy = ev.shiftKey ? 0 : ev.deltaY;
+      setView((v) => ({ ...v, x: v.x - dx, y: v.y - dy }));
+    };
+    vp.addEventListener("wheel", onWheel, { passive: false });
+    return () => vp.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const startPan = (clientX: number, clientY: number) => {
+    panState.current = { startX: clientX, startY: clientY, origX: view.x, origY: view.y };
     const onMove = (mv: PointerEvent) => {
       const ps = panState.current;
       if (!ps) return;
@@ -318,6 +352,7 @@ export default function DiagramCanvas({
     };
     const onUp = () => {
       panState.current = null;
+      document.body.classList.remove("panning");
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
@@ -325,9 +360,76 @@ export default function DiagramCanvas({
     window.addEventListener("pointerup", onUp);
   };
 
-  const fit = () => setView({ x: 0, y: 0, scale: 1 });
-  const zoomBy = (f: number) =>
-    setView((v) => ({ ...v, scale: Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.scale * f)) }));
+  const onBgPointerDown = (ev: React.PointerEvent) => {
+    // Middle-drag pans from anywhere, including from on top of a shape — the
+    // other standard way to move around a canvas this size.
+    if (ev.button === 1) {
+      ev.preventDefault();
+      document.body.classList.add("panning");
+      startPan(ev.clientX, ev.clientY);
+      return;
+    }
+    if (ev.button !== 0) return;
+    if ((ev.target as Element).closest("[data-node-id]")) return;
+    startPan(ev.clientX, ev.clientY);
+  };
+
+  // Measurements the view commands share: viewport box plus the drawing's own
+  // size in world units. Returns null before the SVG has been injected.
+  const measure = () => {
+    const vp = viewportRef.current;
+    const el = svgElRef.current;
+    if (!vp || !el) return null;
+    const sw = el.viewBox.baseVal?.width || el.width.baseVal.value;
+    const sh = el.viewBox.baseVal?.height || el.height.baseVal.value;
+    if (!sw || !sh) return null;
+    return { vw: vp.clientWidth, vh: vp.clientHeight, sw, sh };
+  };
+
+  /** Scale the drawing down (or up) until the whole thing is on screen. */
+  const fitToScreen = () => {
+    const m = measure();
+    if (!m) return setView({ x: 0, y: 0, scale: 1 });
+    const scale = Math.min(
+      MAX_ZOOM,
+      Math.max(MIN_ZOOM, Math.min((m.vw - FIT_PADDING * 2) / m.sw, (m.vh - FIT_PADDING * 2) / m.sh))
+    );
+    setView({ scale, x: (m.vw - m.sw * scale) / 2, y: (m.vh - m.sh * scale) / 2 });
+  };
+
+  /** Re-centre the drawing without touching the current zoom level. */
+  const center = () => {
+    const m = measure();
+    if (!m) return;
+    setView((v) => ({ ...v, x: (m.vw - m.sw * v.scale) / 2, y: (m.vh - m.sh * v.scale) / 2 }));
+  };
+
+  /** Back to 1:1, centred — the "actual size" command. */
+  const resetZoom = () => {
+    const m = measure();
+    if (!m) return setView({ x: 0, y: 0, scale: 1 });
+    setView({ scale: 1, x: (m.vw - m.sw) / 2, y: (m.vh - m.sh) / 2 });
+  };
+
+  const zoomBy = (f: number) => {
+    const vp = viewportRef.current;
+    // Anchor the button zoom on the middle of the viewport, so repeated clicks
+    // magnify what's on screen instead of walking towards the top-left corner.
+    const cx = vp ? vp.clientWidth / 2 : 0;
+    const cy = vp ? vp.clientHeight / 2 : 0;
+    zoomAt(f, cx, cy);
+  };
+
+  // Open a diagram already framed instead of pinned to its top-left corner at
+  // 100% — on the big generated canvases that showed a mostly-empty corner. This
+  // fires once per mount, and App remounts the canvas (via a key on the diagram
+  // id) when a different diagram loads, so an edit never yanks the view.
+  const didFit = useRef(false);
+  useEffect(() => {
+    if (didFit.current || !svgElRef.current) return;
+    didFit.current = true;
+    fitToScreen();
+  }, [svg]);
 
   // ---------- drop a palette shape onto the canvas ----------
   const onDragOver = (ev: React.DragEvent) => {
@@ -357,7 +459,6 @@ export default function DiagramCanvas({
     <div
       className="diagram-viewport"
       ref={viewportRef}
-      onWheel={onWheel}
       onPointerDown={onBgPointerDown}
       onDragOver={onDragOver}
       onDrop={onDrop}
@@ -371,8 +472,21 @@ export default function DiagramCanvas({
       )}
       <div className="zoom-controls">
         <button onClick={() => zoomBy(1.2)} title="Zoom in">+</button>
+        <button
+          className="zoom-readout"
+          onClick={resetZoom}
+          title="Actual size (100%)"
+          aria-label={`Zoom ${Math.round(view.scale * 100)} percent — click for actual size`}
+        >
+          {Math.round(view.scale * 100)}%
+        </button>
         <button onClick={() => zoomBy(1 / 1.2)} title="Zoom out">−</button>
-        <button onClick={fit} title="Reset view">⤢</button>
+        <button className="zoom-wide" onClick={fitToScreen} title="Fit the whole diagram on screen">
+          Fit
+        </button>
+        <button className="zoom-wide" onClick={center} title="Centre the diagram at the current zoom">
+          Center
+        </button>
       </div>
       {busy && <div className="canvas-busy">Recomputing…</div>}
       <div

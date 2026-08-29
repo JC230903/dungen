@@ -6,7 +6,7 @@ interface Props {
   onCreate: (entityType: string) => void;
 }
 
-export const PALETTE_DRAG_MIME = "application/x-diagen-entity-type";
+export const PALETTE_DRAG_MIME = "application/x-drawgen-entity-type";
 
 export default function Palette({ shapes, onCreate }: Props) {
   const [q, setQ] = useState("");

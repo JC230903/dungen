@@ -41,9 +41,22 @@ import StyleRulesPanel from "./components/StyleRulesPanel";
 import ProjectsPanel from "./components/ProjectsPanel";
 import LoginScreen from "./components/LoginScreen";
 import EmptyState from "./components/EmptyState";
+import Sidebar, { SIDEBAR_DEFAULT } from "./components/Sidebar";
+import { usePersistentState } from "./usePersistentState";
 import "./styles.css";
 
 type SidebarTab = "properties" | "palette" | "csv" | "templates" | "outline" | "style" | "projects";
+
+// [key, full label, short label for the collapsed rail]
+const SIDEBAR_TABS: [SidebarTab, string, string][] = [
+  ["properties", "Properties", "Prop"],
+  ["palette", "Palette", "Pal"],
+  ["csv", "CSV", "CSV"],
+  ["templates", "Templates", "Tpl"],
+  ["outline", "Outline", "Out"],
+  ["style", "Style rules", "Sty"],
+  ["projects", "Projects", "Proj"],
+];
 
 function download(filename: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
@@ -71,11 +84,20 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<SidebarTab>("properties");
+  const [tab, setTab] = usePersistentState<SidebarTab>("drawgen.sidebarTab", "properties");
+  const [sidebarWidth, setSidebarWidth] = usePersistentState("drawgen.sidebarWidth", SIDEBAR_DEFAULT);
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState("drawgen.sidebarCollapsed", false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentProjectName, setCurrentProjectName] = useState<string>("");
   const [autosaveAt, setAutosaveAt] = useState<number | null>(null);
+  // Every successful mutation marks the diagram dirty; saving clears it. Drives
+  // both the toolbar's saved/unsaved indicator and the leave-page guard.
+  const [dirty, setDirty] = useState(false);
+  // Where the open diagram came from ("Sample: S1_…", "Uploaded: foo.xlsx", …).
+  // The API response only carries the diagram itself, so provenance is tracked
+  // here at the point of loading.
+  const [source, setSource] = useState<string | null>(null);
   const diagramRef = useRef(diagram);
   diagramRef.current = diagram;
 
@@ -105,8 +127,9 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
 
   // `after` fires once the new diagram is in state — used by project-load to
   // re-attach the project id/name once loading actually succeeds.
-  const runLoad = useCallback((p: Promise<DiagramResponse>, after?: (d: DiagramResponse) => void) => {
+  const runLoad = useCallback((p: Promise<DiagramResponse>, sourceLabel: string | null = null, after?: (d: DiagramResponse) => void) => {
     setLoading(true);
+    setSource(sourceLabel);
     setError(null);
     setSelectedNodeIds([]);
     setSelectedEdgeId(null);
@@ -115,6 +138,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
     setAutosaveAt(null);
     p.then((d) => {
       setDiagram(d);
+      setDirty(false); // freshly loaded == exactly what the server has
       after?.(d);
     })
       .catch(handleErr)
@@ -128,6 +152,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
       setError(null);
       p.then((d) => {
         setDiagram(d);
+        setDirty(true);
         after?.(d, prevIds);
       })
         .catch(handleErr)
@@ -137,21 +162,25 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   );
 
   // ---------- load / bootstrap ----------
-  const onUpload = useCallback((file: File) => runLoad(uploadWorkbook(file)), [runLoad]);
-  const onSample = useCallback((name: string) => runLoad(loadSample(name)), [runLoad]);
-  const onBlank = useCallback(() => runLoad(createBlank()), [runLoad]);
+  const onUpload = useCallback(
+    (file: File) => runLoad(uploadWorkbook(file), `Uploaded: ${file.name}`),
+    [runLoad]
+  );
+  const onSample = useCallback((name: string) => runLoad(loadSample(name), `Sample: ${name}`), [runLoad]);
+  const onBlank = useCallback(() => runLoad(createBlank(), "Blank canvas"), [runLoad]);
   const onSwitchDiagram = useCallback(
     (id: string) => {
       if (!diagram) return;
-      runLoad(switchDiagram(diagram.session_id, id));
+      // Switching sheets inside the same workbook doesn't change where it came from.
+      runLoad(switchDiagram(diagram.session_id, id), source);
     },
-    [diagram, runLoad]
+    [diagram, runLoad, source]
   );
 
   // ---------- saved projects ----------
   const onLoadProject = useCallback(
     (id: string, name: string) => {
-      runLoad(loadProject(id), () => {
+      runLoad(loadProject(id), `Project: ${name}`, () => {
         setCurrentProjectId(id);
         setCurrentProjectName(name);
         setAutosaveAt(Date.now());
@@ -172,6 +201,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
           setCurrentProjectId(info.id);
           setCurrentProjectName(info.name);
           setAutosaveAt(Date.now());
+          setDirty(false);
           refreshProjects();
         })
         .catch((e) => {
@@ -408,13 +438,14 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   );
 
   const onGenerateTemplate = useCallback(
-    (name: string, params: Record<string, string>) => runLoad(generateTemplate(name, params)),
+    (name: string, params: Record<string, string>) =>
+      runLoad(generateTemplate(name, params), `Template: ${name}`),
     [runLoad]
   );
 
   const onGenerateOutline = useCallback(
     (text: string, entityType: string, relationType: string) =>
-      runLoad(generateOutline(text, entityType, relationType)),
+      runLoad(generateOutline(text, entityType, relationType), "Generated from outline"),
     [runLoad]
   );
 
@@ -440,6 +471,13 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   // ---------- keyboard shortcuts ----------
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent) => {
+      // Save is the one shortcut that must survive focus being in a text field —
+      // it also has to beat the browser's own "save page" dialog to preventDefault.
+      if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s") {
+        ev.preventDefault();
+        if (diagramRef.current) onQuickSave();
+        return;
+      }
       if (isTypingTarget(ev.target)) return;
       const d = diagramRef.current;
       if (!d) return;
@@ -467,7 +505,29 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedNodeIds, selectedEdgeId, onUndo, onRedo, onDeleteEdge, onDeleteNode, onBulkDeleteNodes]);
+  }, [
+    selectedNodeIds,
+    selectedEdgeId,
+    onUndo,
+    onRedo,
+    onDeleteEdge,
+    onDeleteNode,
+    onBulkDeleteNodes,
+    onQuickSave,
+  ]);
+
+  // ---------- leave-page guard ----------
+  // Only edits made since the last save are at risk: autosave covers a diagram
+  // already tied to a project, but an unsaved one lives purely in the session.
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (ev: BeforeUnloadEvent) => {
+      ev.preventDefault();
+      ev.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   return (
     <div className="app">
@@ -478,6 +538,9 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
         busy={busy}
         error={error}
         onDismissError={() => setError(null)}
+        source={source}
+        nodeCount={diagram?.nodes.length ?? 0}
+        edgeCount={diagram?.edges.length ?? 0}
         diagrams={diagram?.diagrams ?? []}
         activeDiagramId={diagram?.diagram_id ?? ""}
         direction={diagram?.direction ?? "top-down"}
@@ -497,6 +560,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
         hasSavedProject={!!currentProjectId}
         onQuickSave={onQuickSave}
         lastSavedAt={autosaveAt}
+        dirty={dirty}
         username={username}
         onLogout={onLogout}
       />
@@ -504,6 +568,9 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
         <div className="canvas-area">
           {diagram ? (
             <DiagramCanvas
+              // Remount on a genuinely different diagram so the canvas re-fits to
+              // it; plain edits keep the same key and so keep the user's view.
+              key={`${diagram.session_id}:${diagram.diagram_id}`}
               svg={diagram.svg}
               nodes={diagram.nodes}
               edges={diagram.edges}
@@ -530,25 +597,15 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
           )}
         </div>
         {diagram && (
-          <aside className="sidebar">
-            <div className="tab-bar">
-              {(
-                [
-                  ["properties", "Properties"],
-                  ["palette", "Palette"],
-                  ["csv", "CSV"],
-                  ["templates", "Templates"],
-                  ["outline", "Outline"],
-                  ["style", "Style rules"],
-                  ["projects", "Projects"],
-                ] as [SidebarTab, string][]
-              ).map(([key, label]) => (
-                <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-
+          <Sidebar
+            tabs={SIDEBAR_TABS}
+            tab={tab}
+            onTabChange={setTab}
+            width={sidebarWidth}
+            onWidthChange={setSidebarWidth}
+            collapsed={sidebarCollapsed}
+            onSetCollapsed={setSidebarCollapsed}
+          >
             {tab === "properties" && (
               <PropertiesPanel
                 nodes={diagram.nodes}
@@ -594,7 +651,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
                 onDelete={onDeleteProject}
               />
             )}
-          </aside>
+          </Sidebar>
         )}
       </div>
     </div>

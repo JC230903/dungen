@@ -121,7 +121,7 @@ const client = axios.create({
 });
 
 // ---------- auth ----------
-const TOKEN_KEY = "diagen_token";
+const TOKEN_KEY = "drawgen_token";
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -174,8 +174,34 @@ export async function me(): Promise<{ username: string }> {
 }
 
 // ---------- load / bootstrap ----------
-export async function listSamples(): Promise<string[]> {
-  const r = await client.get<string[]>("/samples");
+export interface SampleInfo {
+  name: string;
+  title: string;
+  // null when the workbook couldn't be read (e.g. it's open in Excel)
+  diagrams: number | null;
+  nodes: number | null;
+  edges: number | null;
+}
+
+/** "51 shapes · 89 links", or null when the workbook couldn't be inspected. */
+export function sampleMeta(s: SampleInfo): string | null {
+  if (s.nodes == null || s.edges == null) return null;
+  const extra = s.diagrams && s.diagrams > 1 ? ` · ${s.diagrams} diagrams` : "";
+  return `${s.nodes} shapes · ${s.edges} links${extra}`;
+}
+
+/** Human label for a sample: its own title if the workbook gives one, otherwise
+ * the filename tidied up (strip the extension and the S1_/S2_ ordering prefix). */
+export function sampleLabel(s: SampleInfo): string {
+  if (s.title) return s.title;
+  return s.name
+    .replace(/\.xlsx$/i, "")
+    .replace(/^S\d+_/, "")
+    .replace(/[_-]+/g, " ");
+}
+
+export async function listSamples(): Promise<SampleInfo[]> {
+  const r = await client.get<SampleInfo[]>("/samples");
   return r.data;
 }
 

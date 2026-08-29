@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { DiagramInfo } from "../api";
-import { listSamples } from "../api";
+import type { DiagramInfo, SampleInfo } from "../api";
+import { listSamples, sampleLabel, sampleMeta } from "../api";
 import ShortcutsHelp from "./ShortcutsHelp";
 
 export type Tool = "select" | "connect";
@@ -12,6 +12,9 @@ interface Props {
   busy: boolean;
   error: string | null;
   onDismissError: () => void;
+  source: string | null;
+  nodeCount: number;
+  edgeCount: number;
   diagrams: DiagramInfo[];
   activeDiagramId: string;
   direction: string;
@@ -31,6 +34,7 @@ interface Props {
   hasSavedProject: boolean;
   onQuickSave: () => void;
   lastSavedAt: number | null;
+  dirty: boolean;
   username: string;
   onLogout: () => void;
 }
@@ -56,6 +60,9 @@ export default function Toolbar({
   busy,
   error,
   onDismissError,
+  source,
+  nodeCount,
+  edgeCount,
   diagrams,
   activeDiagramId,
   direction,
@@ -75,10 +82,11 @@ export default function Toolbar({
   hasSavedProject,
   onQuickSave,
   lastSavedAt,
+  dirty,
   username,
   onLogout,
 }: Props) {
-  const [samples, setSamples] = useState<string[]>([]);
+  const [samples, setSamples] = useState<SampleInfo[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const disabled = loading || busy;
   const savedLabel = useRelativeTime(lastSavedAt);
@@ -89,7 +97,7 @@ export default function Toolbar({
 
   return (
     <div className="topbar">
-      <div className="brand">diagen</div>
+      <div className="brand">DrawGen</div>
 
       <div className="toolbar-group" title="Start a new diagram from a source">
         <button className="btn" onClick={() => fileRef.current?.click()} disabled={disabled}>
@@ -118,8 +126,9 @@ export default function Toolbar({
             Load a sample…
           </option>
           {samples.map((s) => (
-            <option key={s} value={s}>
-              {s}
+            <option key={s.name} value={s.name} title={s.name}>
+              {sampleLabel(s)}
+              {sampleMeta(s) ? ` — ${sampleMeta(s)}` : ""}
             </option>
           ))}
         </select>
@@ -190,11 +199,17 @@ export default function Toolbar({
               className="btn btn-primary"
               onClick={onQuickSave}
               disabled={disabled}
-              title="Save to this machine's local database"
+              title="Save to this machine's local database (Ctrl+S)"
             >
               {hasSavedProject ? "Save" : "Save as…"}
             </button>
-            {savedLabel && <span className="saved-label">{savedLabel}</span>}
+            {dirty ? (
+              <span className="unsaved-label" title="You have edits that aren't saved yet">
+                ● Unsaved
+              </span>
+            ) : (
+              savedLabel && <span className="saved-label">{savedLabel}</span>
+            )}
           </div>
 
           <span className="sep" />
@@ -212,7 +227,25 @@ export default function Toolbar({
         </>
       )}
 
-      <div className="title">{loading ? "Loading…" : title || ""}</div>
+      <div className="title">
+        {loading ? (
+          "Loading…"
+        ) : (
+          <>
+            {title && <span className="title-name">{title}</span>}
+            {hasDiagram && source && (
+              <span className="title-source" title={source}>
+                {source}
+              </span>
+            )}
+            {hasDiagram && (
+              <span className="title-stats">
+                {nodeCount} shapes · {edgeCount} links
+              </span>
+            )}
+          </>
+        )}
+      </div>
       {error && (
         <div className="error">
           {error}

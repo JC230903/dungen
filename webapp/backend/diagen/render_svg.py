@@ -1,10 +1,12 @@
 """SVG renderer: shapes per Shape_Library, edges per Line_Rules."""
 from __future__ import annotations
+import zlib
 import math
 from xml.sax.saxutils import escape
 from .model import Diagram, Node, Edge
 from .spec import Spec
 from . import sizing as SZ
+from .routing import Router
 
 FONT = "Arial, Helvetica, sans-serif"
 TEXT = '#333333'
@@ -31,10 +33,29 @@ def _mid(pts):
     return (x1 + x2) / 2, (y1 + y2) / 2
 
 
+def _stable_hash(*parts) -> int:
+    """Process-independent hash.
+
+    Python randomises str/tuple hashing per process, so anything derived from
+    the built-in hash() changed on every backend restart — the same workbook
+    rendered with different edge offsets and different marker ids each time.
+    """
+    return zlib.crc32('\x1f'.join(str(p) for p in parts).encode('utf-8'))
+
+
+# Separation between two parallel horizontal edge runs, and the clearance an
+# edge keeps from a node box it passes.
+LANE_GAP = 9.0
+LANE_CLEAR = 5.0
+
+
 class SvgRenderer:
     def __init__(self, spec: Spec):
         self.spec = spec
         self.defs = {}
+        self._obst = None
+        self._lanes_used = []
+        self._router = None
 
     # ---------- markers ----------
     def _marker(self, end: str, color: str) -> str:
@@ -45,7 +66,7 @@ class SvgRenderer:
                 break
         if key is None:
             return ''
-        mid = f"m{abs(hash((key, color))) % 10**8}"
+        mid = f"m{_stable_hash(key, color) % 10**8}"
         if mid not in self.defs:
             body, refx, refy, mw, mh = MARKERS[key]
             self.defs[mid] = (
@@ -203,13 +224,134 @@ class SvgRenderer:
         right = other.cx >= n.cx
         return (n.x + n.w if right else n.x, y)
 
-    def _anchor_pts(self, s: Node, t: Node, hint: str, d=None, sp='', tp='', fan=None, twin=None):
+    def _obstacles(self, d):
+        """Leaf boxes edges must not be drawn through (cached per render)."""
+        if self._obst is None:
+            self._obst = [(n.x, n.y, n.x + n.w, n.y + n.h) for n in d.nodes.values()
+                          if not n.children and not self.spec.shape_of(n).is_container]
+        return self._obst
+
+    def _route_around(self, pts, s, t, e):
+        """Re-route an edge through the corridors between boxes.
+
+        Only kicks in when the simple route actually misbehaves — cutting
+        through a box, or retracing a corridor another edge already uses. A
+        clean short route is left exactly as it was, so small diagrams keep
+        their existing (already good) appearance.
+        """
+        r = self._router
+        # An explicit route: hint is the author overriding us on purpose. Ports
+        # are *not* an override — they pin which side of a box the line leaves
+        # from, and the path between those points still has to dodge obstacles.
+        if r is None or 'route:' in (e.hint or ''):
+            return None
+        if not self._path_is_bad(pts, s, t):
+            r.commit(pts)
+            return None
+        routed = r.route(pts[0], pts[-1])
+        if not routed or len(routed) > 8:
+            r.commit(pts)
+            return None
+        r.commit(routed)
+        return routed
+
+    def _path_is_bad(self, pts, s, t):
+        """True if this route crosses a box it shouldn't, or doubles up."""
+        r = self._router
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if abs(ay - by) < 1.0:
+                if r._blocked_h(ay, ax, bx) or r._congestion('h', ay, ax, bx):
+                    return True
+            elif abs(ax - bx) < 1.0:
+                if r._blocked_v(ax, ay, by) or r._congestion('v', ax, ay, by):
+                    return True
+        return False
+
+    def _free_bands(self, d, x1, x2, lo, hi):
+        """Sub-intervals of [lo, hi] where a run from x1..x2 crosses no box.
+
+        In a ranked layout the gaps between rows are exactly these bands, so
+        this is what steers a long horizontal run into the gutter between ranks
+        instead of straight across the boxes sitting in them.
+        """
+        lo_x, hi_x = (x1, x2) if x1 <= x2 else (x2, x1)
+        blocked = []
+        for bx1, by1, bx2, by2 in self._obstacles(d):
+            if bx2 - 2 <= lo_x or bx1 + 2 >= hi_x:
+                continue
+            blocked.append((by1 - LANE_CLEAR, by2 + LANE_CLEAR))
+        blocked.sort()
+        free, cur = [], lo
+        for a, b in blocked:
+            if b <= lo or a >= hi:
+                continue
+            a, b = max(a, lo), min(b, hi)
+            if a > cur:
+                free.append((cur, a))
+            cur = max(cur, b)
+        if cur < hi:
+            free.append((cur, hi))
+        return free
+
+    def _lane_conflict(self, x1, x2, y):
+        """Does a run at `y` sit on top of one already committed to?"""
+        lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
+        for (olo, ohi, oy) in self._lanes_used:
+            if abs(oy - y) < LANE_GAP and not (ohi - 1 <= lo or olo + 1 >= hi):
+                return True
+        return False
+
+    def _plan_jog(self, d, eid, p1, p2, ideal_y):
+        """Choose the y for an edge's horizontal jog.
+
+        Previously every jog sat at a fixed fraction of the gap it crossed, so
+        edges spanning the same band were drawn on top of one another and cut
+        straight through any box in between. Now the run is placed in a band
+        that is actually free of boxes — preferring the one nearest its ideal
+        position — and then nudged within that band to avoid runs already
+        placed, so parallel connections read as separate lines.
+        """
+        lo_y, hi_y = sorted((p1[1], p2[1]))
+        if hi_y - lo_y < 2:
+            return ideal_y
+        lo_b, hi_b = lo_y + 3, hi_y - 3
+        if hi_b <= lo_b:
+            return ideal_y
+
+        bands = self._free_bands(d, p1[0], p2[0], lo_b, hi_b)
+        if not bands:
+            return ideal_y
+        # nearest band to the ideal y (0 distance if the ideal already sits in one)
+        def dist(band):
+            a, b = band
+            return 0.0 if a <= ideal_y <= b else min(abs(ideal_y - a), abs(ideal_y - b))
+        bands.sort(key=dist)
+
+        for a, b in bands:
+            if b - a < 2:
+                continue
+            base = min(max(ideal_y, a + 1), b - 1)
+            step = LANE_GAP
+            k = 0
+            while step * k <= (b - a):
+                for cand in ((base + step * k), (base - step * k)) if k else (base,):
+                    if a + 1 <= cand <= b - 1 and not self._lane_conflict(p1[0], p2[0], cand):
+                        self._lanes_used.append((min(p1[0], p2[0]), max(p1[0], p2[0]), cand))
+                        return cand
+                k += 1
+            # band is full — still better inside it than through a box
+            self._lanes_used.append((min(p1[0], p2[0]), max(p1[0], p2[0]), base))
+            return base
+        return ideal_y
+
+    def _anchor_pts(self, s: Node, t: Node, hint: str, d=None, sp='', tp='', fan=None, twin=None,
+                    eid='', plan=True):
         if sp or tp:
             p1 = self._port_pt(s, sp, t)
             p2 = self._port_pt(t, tp, s)
             if abs(p1[1] - p2[1]) < 1:
                 return [p1, p2]
-            off = (hash((sp, tp, s.id, t.id)) % 7 - 3) * 8
+            off = (_stable_hash(sp, tp, s.id, t.id) % 7 - 3) * 8
             mx = (p1[0] + p2[0]) / 2 + off
             return [p1, (mx, p1[1]), (mx, p2[1]), p2]
         if 'route:right' in hint:
@@ -253,16 +395,11 @@ class SvgRenderer:
                 tidx, tn = twin
                 p2 = (t.x + (tidx + 1) * t.w / (tn + 1), p2[1])
             my = p1[1] + frac * (p2[1] - p1[1])
-            if d:
-                # dodge any unrelated node the jog would otherwise cut through
-                # (e.g. a bus riser passing directly over a box in its path)
-                lo, hi = min(p1[0], p2[0]), max(p1[0], p2[0])
-                span_lo, span_hi = sorted([p1[1], p2[1]])
-                bot = self._blocked(d, lo, hi, my, exclude={s.id, t.id})
-                if bot is not None:
-                    cand = bot + 8
-                    if span_lo <= cand <= span_hi:
-                        my = cand
+            if d and plan:
+                # Global lane assignment: keep this jog clear of node boxes *and*
+                # of every jog already placed, instead of the old single-obstacle
+                # nudge that still let parallel runs stack on one line.
+                my = self._plan_jog(d, eid, p1, p2, my)
             return [p1, (p1[0], my), (p2[0], my), p2]
         else:  # horizontal
             if dx > 0:
@@ -284,7 +421,7 @@ class SvgRenderer:
         if 'route:arc-top' in e.hint:
             return self._edge_svg_arc(e, l, s, t)
         twin = (par_idx, par_n) if par_n > 1 else None
-        pts = self._anchor_pts(s, t, e.hint, d, e.sport, e.tport, fan=fan, twin=twin)
+        pts = self._anchor_pts(s, t, e.hint, d, e.sport, e.tport, fan=fan, twin=twin, eid=e.id)
         # SZ-12 old parallel offset: only needed when the newer fan/twin spread
         # above didn't already separate these edges (e.g. non-hub same-pair
         # edges elsewhere in the diagram); skip it here to avoid double-shifting.
@@ -294,6 +431,12 @@ class SvgRenderer:
             pts = [(px + off, py) if vertical else (px, py + off) for px, py in pts]
         if l.routing == 'straight' and 'route:' not in e.hint:
             pts = [pts[0], pts[-1]]
+        else:
+            # Obstacle-avoiding pass runs last, on the final geometry — an
+            # earlier pass would have its work undone by the offset above.
+            routed = self._route_around(pts, s, t, e)
+            if routed:
+                pts = routed
         path = 'M' + ' L'.join(f'{px:.0f},{py:.0f}' for px, py in pts)
         dash = DASH.get(l.style)
         attrs = f'stroke="{l.color}" stroke-width="{l.width}" fill="none"'
@@ -384,6 +527,11 @@ class SvgRenderer:
     # ---------- diagram ----------
     def render(self, d: Diagram, canvas_w: float, canvas_h: float) -> str:
         self.defs = {}
+        # Route planning state is per-render: obstacle boxes for this diagram,
+        # and the running list of horizontal runs already committed to.
+        self._obst = None
+        self._lanes_used = []
+        self._router = None
         # Seed with every leaf node's box (shrunk slightly) so edge labels steer
         # clear of boxes too, not just other labels. Containers are excluded —
         # they're just background panels, labels are expected to sit on them.
@@ -417,9 +565,8 @@ class SvgRenderer:
                 fan_groups.setdefault(e.source, []).append(e)
         for grp in fan_groups.values():
             grp.sort(key=lambda e: d.nodes[e.target].cx)
-        for e in d.edges:
-            grp = pairs[frozenset((e.source, e.target))]
-            fan = None
+
+        def fan_of(e):
             s, t = d.nodes.get(e.source), d.nodes.get(e.target)
             # only look this edge up in its source's fan group if it actually
             # qualifies for one itself (same abs(dy)>=10 test used to build the
@@ -429,7 +576,32 @@ class SvgRenderer:
             if s and t and abs(t.cy - s.cy) >= 10:
                 fgrp = fan_groups.get(e.source)
                 if fgrp and len(fgrp) > 1:
-                    fan = (fgrp.index(e), len(fgrp))
+                    return (fgrp.index(e), len(fgrp))
+            return None
+
+        # Dry pass: work out where every edge starts and ends so the router's
+        # grid can include those points once, instead of being rebuilt (and
+        # re-masked) for each edge in turn.
+        router = Router(self._obstacles(d), canvas_w, canvas_h)
+        terminals = []
+        for e in d.edges:
+            s, t = d.nodes.get(e.source), d.nodes.get(e.target)
+            if not s or not t or 'route:arc-top' in e.hint:
+                continue
+            grp = pairs[frozenset((e.source, e.target))]
+            twin = (grp.index(e), len(grp)) if len(grp) > 1 else None
+            pts = self._anchor_pts(s, t, e.hint, d, e.sport, e.tport,
+                                   fan=fan_of(e), twin=twin, eid=e.id, plan=False)
+            terminals.append(pts[0])
+            terminals.append(pts[-1])
+        router.set_terminals(terminals)
+        # A very dense diagram makes the channel grid too big to A* quickly;
+        # there the simple routes stand on their own rather than stalling.
+        self._router = router if router.usable() else None
+
+        for e in d.edges:
+            grp = pairs[frozenset((e.source, e.target))]
+            fan = fan_of(e)
             body.append(f'<g data-edge-id="{escape(e.id)}" data-source="{escape(e.source)}" '
                         f'data-target="{escape(e.target)}">'
                         + self._edge_svg(e, d, grp.index(e), len(grp), fan=fan) + '</g>')

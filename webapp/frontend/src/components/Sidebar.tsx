@@ -1,0 +1,132 @@
+import { useCallback, useEffect, useRef } from "react";
+
+export const SIDEBAR_MIN = 260;
+export const SIDEBAR_MAX = 640;
+export const SIDEBAR_DEFAULT = 340;
+
+interface Props<T extends string> {
+  tabs: [T, string, string][]; // [key, full label, short label for the collapsed rail]
+  tab: T;
+  onTabChange: (t: T) => void;
+  width: number;
+  onWidthChange: (w: number) => void;
+  collapsed: boolean;
+  onSetCollapsed: (c: boolean) => void;
+  children: React.ReactNode;
+}
+
+export default function Sidebar<T extends string>({
+  tabs,
+  tab,
+  onTabChange,
+  width,
+  onWidthChange,
+  collapsed,
+  onSetCollapsed,
+  children,
+}: Props<T>) {
+  const dragging = useRef(false);
+
+  const onPointerMove = useCallback(
+    (ev: PointerEvent) => {
+      if (!dragging.current) return;
+      // The sidebar is docked right, so its width is whatever is left between the
+      // pointer and the window's right edge.
+      const next = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, window.innerWidth - ev.clientX));
+      onWidthChange(next);
+    },
+    [onWidthChange]
+  );
+
+  const stopDrag = useCallback(() => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    document.body.classList.remove("resizing-col");
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", stopDrag);
+    window.addEventListener("pointercancel", stopDrag);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", stopDrag);
+      window.removeEventListener("pointercancel", stopDrag);
+    };
+  }, [onPointerMove, stopDrag]);
+
+  const startDrag = (ev: React.PointerEvent) => {
+    ev.preventDefault();
+    dragging.current = true;
+    // Suppress text selection and keep the resize cursor while dragging over the canvas.
+    document.body.classList.add("resizing-col");
+  };
+
+  if (collapsed) {
+    return (
+      <aside className="sidebar-rail">
+        <button
+          className="rail-toggle"
+          onClick={() => onSetCollapsed(false)}
+          title="Expand panel"
+          aria-label="Expand panel"
+          aria-expanded={false}
+        >
+          ‹
+        </button>
+        {tabs.map(([key, label, short]) => (
+          <button
+            key={key}
+            className={`rail-tab ${tab === key ? "active" : ""}`}
+            title={label}
+            aria-label={label}
+            onClick={() => {
+              onTabChange(key);
+              onSetCollapsed(false);
+            }}
+          >
+            {short}
+          </button>
+        ))}
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="sidebar" style={{ width }}>
+      <div
+        className="sidebar-resizer"
+        onPointerDown={startDrag}
+        onDoubleClick={() => onWidthChange(SIDEBAR_DEFAULT)}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panel (double-click to reset)"
+        title="Drag to resize · double-click to reset"
+      />
+      <div className="sidebar-head">
+        <div className="tab-bar">
+          {tabs.map(([key, label]) => (
+            <button
+              key={key}
+              className={tab === key ? "active" : ""}
+              onClick={() => onTabChange(key)}
+              aria-pressed={tab === key}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          className="rail-toggle"
+          onClick={() => onSetCollapsed(true)}
+          title="Collapse panel"
+          aria-label="Collapse panel"
+          aria-expanded
+        >
+          ›
+        </button>
+      </div>
+      <div className="sidebar-body">{children}</div>
+    </aside>
+  );
+}

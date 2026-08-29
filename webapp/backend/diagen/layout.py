@@ -9,6 +9,61 @@ from collections import defaultdict, deque
 from .model import Diagram, Node
 from .spec import Spec
 from . import sizing as SZ
+from . import ordering as ORD
+
+
+def _sibling_adjacency(d: Diagram, ns):
+    """Edges between the members of one parent group, lifted to that level.
+
+    An edge between two deeply-nested nodes still tells us something about how
+    their top-level ancestors should sit relative to each other, so each
+    endpoint is walked up to whichever sibling contains it.
+    """
+    ids = {n.id for n in ns}
+
+    def lift(nid):
+        n = d.nodes.get(nid)
+        while n is not None and n.id not in ids:
+            n = d.nodes.get(n.parent)
+        return n.id if n is not None else None
+
+    adj = defaultdict(set)
+    weight = defaultdict(int)
+    for e in d.edges:
+        a, b = lift(e.source), lift(e.target)
+        # 'reports_to' points from subordinate to manager; the hierarchy reads
+        # the other way round.
+        if e.relation == 'reports_to':
+            a, b = b, a
+        if a and b and a != b:
+            adj[a].add(b)
+            weight[(a, b)] += 1
+    return adj, sum(len(v) for v in adj.values())
+
+
+def _longest_path_ranks(ids, adj):
+    """Rank = longest path from any source. `adj` must already be acyclic."""
+    indeg = {i: 0 for i in ids}
+    for u, vs in adj.items():
+        for v in vs:
+            if v in indeg:
+                indeg[v] += 1
+    rank = {i: 1 for i in ids}
+    # sorted, not raw set order — see the note in ordering.acyclic; the ranking
+    # has to come out the same every time the same workbook is opened
+    q = deque(i for i in sorted(ids) if indeg[i] == 0)
+    guard = 0
+    while q and guard < 500000:
+        guard += 1
+        u = q.popleft()
+        for v in sorted(adj.get(u, ())):
+            if v not in indeg:
+                continue
+            rank[v] = max(rank[v], rank[u] + 1)
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    return rank
 
 
 def _auto_rank(d: Diagram) -> None:
@@ -19,39 +74,13 @@ def _auto_rank(d: Diagram) -> None:
         if all(n.rank > 0 for n in ns):
             continue
         ids = {n.id for n in ns}
-
-        def lift(nid):
-            n = d.nodes.get(nid)
-            while n is not None and n.id not in ids:
-                n = d.nodes.get(n.parent)
-            return n.id if n is not None else None
-
-        adj = defaultdict(set)
-        indeg = {n.id: 0 for n in ns}
-        internal = 0
-        for e in d.edges:
-            a, b = lift(e.source), lift(e.target)
-            if e.relation == 'reports_to':
-                a, b = b, a
-            if a and b and a != b and b not in adj[a]:
-                adj[a].add(b)
-                indeg[b] += 1
-                internal += 1
-        rank = {}
-        q = deque(i for i in indeg if indeg[i] == 0)
-        for i in q:
-            rank[i] = 1
-        guard = 0
-        while q and guard < 50000:
-            guard += 1
-            u = q.popleft()
-            for v in adj[u]:
-                rank[v] = max(rank.get(v, 1), rank[u] + 1)
-                indeg[v] -= 1
-                if indeg[v] == 0:
-                    q.append(v)
+        adj_raw, internal = _sibling_adjacency(d, ns)
+        adj = ORD.acyclic(ids, adj_raw)
+        rank = _longest_path_ranks(ids, adj)
         maxr = max(rank.values(), default=1)
+
         if internal == 0 or (maxr == 1 and len(ns) > 4):
+            # Nothing to derive a hierarchy from — lay the group out as a grid.
             cols = max(1, round(math.sqrt(len(ns) * 1.2)))
             for i, n in enumerate(ns):
                 if n.rank == 0:
@@ -59,37 +88,43 @@ def _auto_rank(d: Diagram) -> None:
                 if n.order == 0:
                     n.order = i % cols + 1
             continue
+
         for n in ns:
             if n.rank == 0:
                 n.rank = rank.get(n.id, maxr)
-        # wrap over-wide ranks so wide groups stay near-square
-        cap = max(4, round(math.sqrt(len(ns) * 1.2)))
-        if len(ns) > 8:
-            newrank = 0
-            for r in sorted({n.rank for n in ns}):
-                row = sorted([n for n in ns if n.rank == r], key=lambda n: n.order or 999)
-                for i in range(0, len(row), cap):
-                    newrank += 1
-                    for j, n in enumerate(row[i:i + cap]):
-                        n.rank = newrank
-                        if n.order == 0:
-                            n.order = j + 1
-        # barycenter ordering to reduce crossings
+
+        # Wrapping a very wide rank keeps the drawing from becoming a single
+        # enormous row, but it also splits siblings across rows — so only do it
+        # when a rank is genuinely unmanageable, and chunk it in crossing-aware
+        # order (below) rather than in arbitrary dict order.
         byrank = defaultdict(list)
         for n in ns:
             byrank[n.rank].append(n)
-        pos = {}
-        for r in sorted(byrank):
-            row = byrank[r]
+        seed = {n.id: (n.order or 0) for n in ns}
+        pre = ORD.order_ranks({r: [n.id for n in v] for r, v in byrank.items()}, adj, seed=seed)
 
-            def bary(n):
-                p = [pos[a] for a in adj if n.id in adj[a] and a in pos]
-                return sum(p) / len(p) if p else 1e9
-            row.sort(key=lambda n: (n.order or 999, bary(n)))
-            for i, n in enumerate(row):
-                if n.order == 0:
-                    n.order = i + 1
-                pos[n.id] = n.order
+        cap = max(6, round(math.sqrt(len(ns) * 1.6)))
+        widest = max((len(v) for v in pre.values()), default=0)
+        if widest > cap:
+            newrank = 0
+            remapped = {}
+            for r in sorted(pre):
+                row = pre[r]
+                for i in range(0, len(row), cap):
+                    newrank += 1
+                    for nid in row[i:i + cap]:
+                        remapped[nid] = newrank
+            for n in ns:
+                n.rank = remapped.get(n.id, n.rank)
+            byrank = defaultdict(list)
+            for n in ns:
+                byrank[n.rank].append(n)
+            pre = ORD.order_ranks({r: [n.id for n in v] for r, v in byrank.items()}, adj, seed=seed)
+
+        for r, row in pre.items():
+            for i, nid in enumerate(row):
+                d.nodes[nid].order = i + 1
+
     for n in d.nodes.values():          # safety net
         if n.rank == 0:
             n.rank = 1
@@ -97,10 +132,29 @@ def _auto_rank(d: Diagram) -> None:
             n.order = 1
 
 
-def _rank_rows(nodes, gap_x, gap_y, lr=False):
+# A horizontal edge run needs its own lane; when many edges cross the same rank
+# boundary the gap has to grow or they end up drawn through the boxes below it.
+LANE_H = 9.0
+MAX_EXTRA_GUTTER = 120.0
+
+
+def _gutters(nodes, edges_between):
+    """Extra space to add after each rank so edge runs have somewhere to go.
+
+    `edges_between[r]` is how many edges cross the boundary after rank r.
+    """
+    out = {}
+    for r, count in edges_between.items():
+        if count > 1:
+            out[r] = min(MAX_EXTRA_GUTTER, (count - 1) * LANE_H * 0.6)
+    return out
+
+
+def _rank_rows(nodes, gap_x, gap_y, lr=False, gutters=None):
     """Place nodes rank by rank. TB: ranks = rows. LR: ranks = columns."""
     if not nodes:  # empty diagram/container (e.g. a fresh blank canvas) — no rows to place
         return 0.0, 0.0
+    gutters = gutters or {}
     ranks = sorted({n.rank for n in nodes})
     if lr:
         cols = []
@@ -111,12 +165,12 @@ def _rank_rows(nodes, gap_x, gap_y, lr=False):
             cols.append((col, cw, ch))
         total_h = max(ch for _, _, ch in cols)
         x = 0.0
-        for col, cw, ch in cols:
+        for r, (col, cw, ch) in zip(ranks, cols):
             y = (total_h - ch) / 2
             for n in col:
                 n.x, n.y = SZ.snap(x + (cw - n.w) / 2), SZ.snap(y)
                 y += n.h + gap_y
-            x += cw + gap_x
+            x += cw + gap_x + gutters.get(r, 0.0)
         return x - gap_x, total_h
     rows = []
     for r in ranks:
@@ -126,13 +180,15 @@ def _rank_rows(nodes, gap_x, gap_y, lr=False):
         rows.append((row, rw, rh))
     total_w = max(rw for _, rw, _ in rows)
     y = 0.0
-    for row, rw, rh in rows:
+    last_gutter = 0.0
+    for r, (row, rw, rh) in zip(ranks, rows):
         x = (total_w - rw) / 2
         for n in row:
             n.x, n.y = SZ.snap(x), SZ.snap(y + (rh - n.h) / 2)
             x += n.w + gap_x
-        y += rh + gap_y
-    return total_w, y - gap_y
+        last_gutter = gutters.get(r, 0.0)
+        y += rh + gap_y + last_gutter
+    return total_w, y - gap_y - last_gutter
 
 
 def _shift(n: Node, dx: float, dy: float):
@@ -142,11 +198,36 @@ def _shift(n: Node, dx: float, dy: float):
         _shift(c, dx, dy)
 
 
-def _layout_container(n: Node, spec: Spec, lr=False):
+def _crossing_counts(d: Diagram, nodes):
+    """How many edges span each rank boundary within this sibling group."""
+    ids = {n.id for n in nodes}
+    rank_of = {n.id: n.rank for n in nodes}
+
+    def lift(nid):
+        n = d.nodes.get(nid)
+        while n is not None and n.id not in ids:
+            n = d.nodes.get(n.parent)
+        return n.id if n is not None else None
+
+    counts = defaultdict(int)
+    for e in d.edges:
+        a, b = lift(e.source), lift(e.target)
+        if not a or not b or a == b:
+            continue
+        ra, rb = rank_of.get(a), rank_of.get(b)
+        if ra is None or rb is None or ra == rb:
+            continue
+        for r in range(min(ra, rb), max(ra, rb)):
+            counts[r] += 1
+    return counts
+
+
+def _layout_container(n: Node, spec: Spec, lr=False, d: Diagram = None):
     for c in n.children:
-        _layout_container(c, spec, lr)
+        _layout_container(c, spec, lr, d)
     if n.children:
-        w, h = _rank_rows(n.children, SZ.GAP_X_IN, SZ.GAP_Y_IN, lr)
+        gut = _gutters(n.children, _crossing_counts(d, n.children)) if d else {}
+        w, h = _rank_rows(n.children, SZ.GAP_X_IN, SZ.GAP_Y_IN, lr, gutters=gut)
         # SZ-08: container wraps children
         n.w = max(n.w if spec.shape_of(n).is_container is False else 0,
                   w + 2 * SZ.PAD_C)
@@ -163,7 +244,7 @@ def layout(d: Diagram, spec: Spec):
         SZ.size_node(n, spec)
     tops = d.top_level()
     for n in tops:
-        _layout_container(n, spec, lr)
+        _layout_container(n, spec, lr, d)
     # EA layer bands: if every top-level node is a container, unify widths
     if not lr and all(spec.shape_of(n).is_container for n in tops) and len(tops) > 1:
         target = max(n.w for n in tops)
@@ -173,7 +254,8 @@ def layout(d: Diagram, spec: Spec):
                 n.w = target
                 for c in n.children:
                     _shift(c, extra / 2, 0)
-    _rank_rows(tops, SZ.GAP_X + (30 if lr else 0), SZ.GAP_Y, lr)
+    _rank_rows(tops, SZ.GAP_X + (30 if lr else 0), SZ.GAP_Y, lr,
+               gutters=_gutters(tops, _crossing_counts(d, tops)))
     # make positions absolute (children were local to parent).
     # NOTE: must shift only the immediate child here, NOT via the recursive
     # _shift() (which also walks grandchildren) — this function's own

@@ -12,6 +12,7 @@ anywhere in this project — the React frontend is a thin client over this API.
 """
 from __future__ import annotations
 import copy
+from contextlib import asynccontextmanager
 import csv
 import io
 import os
@@ -45,7 +46,41 @@ MAX_CSV_BYTES = 5 * 1024 * 1024       # per CSV-paste field
 MAX_PROJECT_NAME_LEN = 200
 MAX_PROJECTS_PER_USER = 500
 
-app = FastAPI(title="diagen API")
+# Accounts created automatically on startup so the team always has a way in
+# without anyone signing up first. Seeding is idempotent: an existing username
+# is left completely alone, so a password changed later is never reset by a
+# restart. Set SEED_USERS=0 to skip it — do that for any deployment where these
+# well-known credentials would be a real exposure.
+SEED_USERS = [
+    "abhijit.davande",
+    "jacob.c",
+    "pallash.padman",
+    "manav.rathi",
+]
+SEED_PASSWORD = os.environ.get("SEED_USER_PASSWORD", "password")
+
+
+def _seed_users() -> None:
+    if os.environ.get("SEED_USERS", "1") == "0":
+        return
+    for username in SEED_USERS:
+        try:
+            if auth_store.get_user_by_username(username):
+                continue
+            auth_store.create_user(username, SEED_PASSWORD)
+            print(f"[seed] created user {username}")
+        except Exception as exc:                       # noqa: BLE001
+            # A seeding failure must never stop the API from coming up.
+            print(f"[seed] could not create {username}: {exc}")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _seed_users()
+    yield
+
+
+app = FastAPI(title="DrawGen API", lifespan=_lifespan)
 
 # `FRONTEND_ORIGIN` (comma-separated) restricts CORS to real cross-origin
 # deployments — e.g. GCP Cloud Run, where frontend and backend are two
@@ -534,11 +569,61 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/api/samples")
-def list_samples() -> list[str]:
+class SampleInfo(BaseModel):
+    name: str
+    title: str = ""
+    # None (not 0) when the workbook couldn't be read — e.g. it's open in Excel,
+    # which locks the file. "0 shapes" would be a lie; "unknown" is the truth.
+    diagrams: Optional[int] = None
+    nodes: Optional[int] = None
+    edges: Optional[int] = None
+
+
+# Opening every workbook on each request would be wasteful for a list that
+# changes only when someone drops a file into samples/. Keyed by (mtime, size)
+# so an edited or replaced sample re-reads itself without a restart.
+_sample_meta_cache: dict[str, tuple[tuple[float, int], SampleInfo]] = {}
+
+
+def _sample_info(path: Path) -> SampleInfo:
+    stat = path.stat()
+    key = (stat.st_mtime, stat.st_size)
+    cached = _sample_meta_cache.get(path.name)
+    if cached and cached[0] == key:
+        return cached[1]
+
+    info = SampleInfo(name=path.name)
+    try:
+        spec = Spec(str(path), use_defaults=True)
+        info.diagrams = len(spec.diagrams)
+        info.nodes = sum(len(d.nodes) for d in spec.diagrams.values())
+        info.edges = sum(len(d.edges) for d in spec.diagrams.values())
+        first = next(iter(spec.diagrams.values()), None)
+        title = (first.title if first else "") or ""
+        # Diagram.title defaults to the diagram id when the workbook's Diagrams
+        # sheet gives no title, so "D1" means "untitled" — not a useful label.
+        info.title = "" if first and title == first.id else title
+    except Exception:
+        # An unreadable workbook (malformed, or locked open in Excel) shouldn't
+        # blank out the whole picker — list it by filename with counts left
+        # unknown, and let the load attempt report the real error.
+        info.diagrams = info.nodes = info.edges = None
+        # Don't cache a failure: a file locked by Excel right now will read fine
+        # once it's closed, and its mtime won't have changed to invalidate this.
+        return info
+
+    _sample_meta_cache[path.name] = (key, info)
+    return info
+
+
+@app.get("/api/samples", response_model=list[SampleInfo])
+def list_samples() -> list[SampleInfo]:
     if not SAMPLES_DIR.exists():
         return []
-    return sorted(p.name for p in SAMPLES_DIR.glob("*.xlsx"))
+    # Excel writes `~$name.xlsx` lock files next to an open workbook; those are
+    # not samples and can't be opened, so they never belong in the picker.
+    paths = sorted(p for p in SAMPLES_DIR.glob("*.xlsx") if not p.name.startswith("~$"))
+    return [_sample_info(p) for p in paths]
 
 
 @app.get("/api/palette", response_model=PaletteResponse)

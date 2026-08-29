@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import type { LineOut, ShapeOut } from "../api";
-import { getPalette, listSamples } from "../api";
+import type { LineOut, SampleInfo, ShapeOut } from "../api";
+import { getPalette, listSamples, sampleLabel, sampleMeta } from "../api";
 import TemplatesPanel from "./TemplatesPanel";
 import OutlinePanel from "./OutlinePanel";
 
@@ -15,7 +15,7 @@ interface Props {
 type Expanded = "template" | "outline" | null;
 
 export default function EmptyState({ onBlank, onSample, onUpload, onGenerateTemplate, onGenerateOutline }: Props) {
-  const [samples, setSamples] = useState<string[]>([]);
+  const [samples, setSamples] = useState<SampleInfo[]>([]);
   const [expanded, setExpanded] = useState<Expanded>(null);
   const [shapes, setShapes] = useState<ShapeOut[]>([]);
   const [lines, setLines] = useState<LineOut[]>([]);
@@ -80,25 +80,19 @@ export default function EmptyState({ onBlank, onSample, onUpload, onGenerateTemp
         )}
 
         {samples.length > 0 && (
-          <label className="field">
-            <span>Or load a sample workbook</span>
-            <select
-              defaultValue=""
-              onChange={(e) => {
-                if (e.target.value) onSample(e.target.value);
-                e.target.value = "";
-              }}
-            >
-              <option value="" disabled>
-                Choose a sample…
-              </option>
+          <div className="field">
+            <span>Or open a sample workbook</span>
+            <ul className="sample-list">
               {samples.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
+                <li key={s.name}>
+                  <button className="sample-item" onClick={() => onSample(s.name)} title={s.name}>
+                    <span className="sample-name">{sampleLabel(s)}</span>
+                    {sampleMeta(s) && <span className="sample-meta">{sampleMeta(s)}</span>}
+                  </button>
+                </li>
               ))}
-            </select>
-          </label>
+            </ul>
+          </div>
         )}
       </div>
     </div>
