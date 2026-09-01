@@ -56,16 +56,96 @@ type SidebarTab =
   | "style"
   | "projects";
 
-// [key, full label, short label for the collapsed rail]
-const SIDEBAR_TABS: [SidebarTab, string, string][] = [
-  ["properties", "Properties", "Prop"],
-  ["palette", "Palette", "Pal"],
-  ["csv", "CSV", "CSV"],
-  ["templates", "Templates", "Tpl"],
-  ["outline", "Outline", "Out"],
-  ["voice", "Voice", "Voc"],
-  ["style", "Style rules", "Sty"],
-  ["projects", "Projects", "Proj"],
+// Icons for the collapsed rail — 18px, stroke-based so they pick up the
+// button's text color (grey normally, white when active).
+function railIcon(children: React.ReactNode) {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 18 18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+const ICONS = {
+  // sliders
+  properties: railIcon(
+    <>
+      <path d="M3 5h12M3 9h12M3 13h12" />
+      <circle cx="7" cy="5" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="9" r="1.8" fill="currentColor" stroke="none" />
+      <circle cx="6" cy="13" r="1.8" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // square + circle shapes
+  palette: railIcon(
+    <>
+      <rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1" />
+      <circle cx="12" cy="12" r="3.5" />
+    </>
+  ),
+  // table grid
+  csv: railIcon(
+    <>
+      <rect x="2.5" y="3.5" width="13" height="11" rx="1" />
+      <path d="M2.5 7h13M7 3.5v11M11.5 3.5v11" />
+    </>
+  ),
+  // page layout blocks
+  templates: railIcon(
+    <>
+      <rect x="2.5" y="2.5" width="13" height="13" rx="1" />
+      <path d="M2.5 6.5h13M8 6.5v9" />
+    </>
+  ),
+  // indented list
+  outline: railIcon(
+    <>
+      <path d="M3 4h9M6 9h9M6 14h9" />
+      <circle cx="3.5" cy="9" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="3.5" cy="14" r="0.8" fill="currentColor" stroke="none" />
+    </>
+  ),
+  // microphone
+  voice: railIcon(
+    <>
+      <rect x="6.75" y="2" width="4.5" height="8" rx="2.25" />
+      <path d="M4 8.5a5 5 0 0 0 10 0M9 13.5V16M6.5 16h5" />
+    </>
+  ),
+  // paint drop
+  style: railIcon(
+    <>
+      <path d="M9 2.5c2.6 3.2 4.5 5.7 4.5 8a4.5 4.5 0 0 1-9 0c0-2.3 1.9-4.8 4.5-8z" />
+    </>
+  ),
+  // folder
+  projects: railIcon(
+    <>
+      <path d="M2.5 5a1 1 0 0 1 1-1h3.6l1.6 2h5.8a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V5z" />
+    </>
+  ),
+};
+
+// [key, full label, icon for the collapsed rail]
+const SIDEBAR_TABS: [SidebarTab, string, React.ReactNode][] = [
+  ["properties", "Properties", ICONS.properties],
+  ["palette", "Palette", ICONS.palette],
+  ["csv", "CSV", ICONS.csv],
+  ["templates", "Templates", ICONS.templates],
+  ["outline", "Outline", ICONS.outline],
+  ["voice", "Voice", ICONS.voice],
+  ["style", "Style rules", ICONS.style],
+  ["projects", "Projects", ICONS.projects],
 ];
 
 function download(filename: string, content: string, mime: string) {

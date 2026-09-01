@@ -568,7 +568,14 @@ class SvgRenderer:
                     yd = bot + 10
                     out_x = p1[0] + (STUB if dx > 0 else -STUB)
                     in_x = p2[0] - (STUB if dx > 0 else -STUB)
-                    return [p1, (out_x, p1[1]), (out_x, yd), (in_x, yd), (in_x, p2[1]), p2]
+                    # When the dipped run still falls within a box's side face,
+                    # leave/enter at that y directly — the 8px climb-back elbow
+                    # hard against the face read as a detached arrowhead.
+                    s_face = s.y + 4 <= yd <= s.y + s.h - 4
+                    t_face = t.y + 4 <= yd <= t.y + t.h - 4
+                    start = [(p1[0], yd)] if s_face else [p1, (out_x, p1[1]), (out_x, yd)]
+                    end = [(p2[0], yd)] if t_face else [(in_x, yd), (in_x, p2[1]), p2]
+                    return start + end
                 return [p1, p2]
             mx = (p1[0] + p2[0]) / 2
             return [p1, (mx, p1[1]), (mx, p2[1]), p2]
@@ -701,15 +708,25 @@ class SvgRenderer:
             if L < 1:
                 walked += L
                 continue
-            vertical = abs(b[0] - a[0]) < abs(b[1] - a[1])
-            need = bh if vertical else bw
+            # The caption is turned a flat -90°, so it only lines up with a
+            # segment that is genuinely vertical. "Taller than it is wide" was
+            # too loose: a 45° straight link satisfied it and got a caption
+            # running straight down across a diagonal line.
+            dxs, dys = abs(b[0] - a[0]), abs(b[1] - a[1])
+            vertical = dxs < dys and dxs <= max(8.0, 0.25 * dys)
+            # A rotated caption runs *along* a vertical segment, so the room it
+            # needs there is the text's length (bw), not the block height —
+            # measuring bh let a full-width caption rotate onto a ~20px elbow
+            # and overhang every box above and below it.
+            vert_ok = vertical and L >= bw * 0.95
+            need = bh if (vertical and not vert_ok) else bw
             mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
             ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
             # how far the centre may shift before the block overhangs a corner
             half_room = max(0.0, (L - need) / 2)
             centre_pos = (walked + L / 2) / total
             segs.append((abs(centre_pos - 0.5), mx, my, ux, uy, half_room,
-                         vertical and L >= need * 0.95, L, need))
+                         vert_ok, L, need))
             walked += L
         if not segs:
             mx, my = _mid(pts)

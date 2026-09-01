@@ -5,7 +5,7 @@ export const SIDEBAR_MAX = 640;
 export const SIDEBAR_DEFAULT = 340;
 
 interface Props<T extends string> {
-  tabs: [T, string, string][]; // [key, full label, short label for the collapsed rail]
+  tabs: [T, string, React.ReactNode][]; // [key, full label, icon for the collapsed rail]
   tab: T;
   onTabChange: (t: T) => void;
   width: number;
@@ -74,7 +74,7 @@ export default function Sidebar<T extends string>({
         >
           ‹
         </button>
-        {tabs.map(([key, label, short]) => (
+        {tabs.map(([key, label, icon]) => (
           <button
             key={key}
             className={`rail-tab ${tab === key ? "active" : ""}`}
@@ -85,7 +85,7 @@ export default function Sidebar<T extends string>({
               onSetCollapsed(false);
             }}
           >
-            {short}
+            {icon}
           </button>
         ))}
       </aside>
