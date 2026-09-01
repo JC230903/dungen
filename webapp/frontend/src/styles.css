@@ -537,3 +537,40 @@ body.panning { cursor: grabbing; user-select: none; }
   text-align: left;
 }
 .downloads { display: flex; flex-direction: column; gap: 8px; }
+
+/* ---------- voice planner ---------- */
+.voice-mic {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  justify-content: center;
+  padding: 10px 12px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.voice-mic .voice-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #4472C4;
+  flex: none;
+}
+.voice-mic.recording {
+  background: #fdecea;
+  border-color: #b3261e;
+  color: #b3261e;
+}
+.voice-mic.recording .voice-dot {
+  background: #b3261e;
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.6); opacity: 0.5; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-mic.recording .voice-dot { animation: none; }
+}
+.voice-live { font-style: italic; min-height: 16px; }
+.voice-error { color: #b3261e; font-size: 12px; margin: 6px 0; }

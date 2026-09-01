@@ -2,8 +2,16 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "diagen",
-      "url": "http://localhost:5173"
+      "name": "backend",
+      "runtimeExecutable": "webapp/backend/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000", "--app-dir", "webapp/backend"],
+      "port": 8000
+    },
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "webapp/frontend"],
+      "port": 5173
     }
   ]
 }

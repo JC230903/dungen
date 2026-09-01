@@ -39,13 +39,22 @@ import TemplatesPanel from "./components/TemplatesPanel";
 import OutlinePanel from "./components/OutlinePanel";
 import StyleRulesPanel from "./components/StyleRulesPanel";
 import ProjectsPanel from "./components/ProjectsPanel";
+import VoicePanel from "./components/VoicePanel";
 import LoginScreen from "./components/LoginScreen";
 import EmptyState from "./components/EmptyState";
 import Sidebar, { SIDEBAR_DEFAULT } from "./components/Sidebar";
 import { usePersistentState } from "./usePersistentState";
 import "./styles.css";
 
-type SidebarTab = "properties" | "palette" | "csv" | "templates" | "outline" | "style" | "projects";
+type SidebarTab =
+  | "properties"
+  | "palette"
+  | "csv"
+  | "templates"
+  | "outline"
+  | "voice"
+  | "style"
+  | "projects";
 
 // [key, full label, short label for the collapsed rail]
 const SIDEBAR_TABS: [SidebarTab, string, string][] = [
@@ -54,6 +63,7 @@ const SIDEBAR_TABS: [SidebarTab, string, string][] = [
   ["csv", "CSV", "CSV"],
   ["templates", "Templates", "Tpl"],
   ["outline", "Outline", "Out"],
+  ["voice", "Voice", "Voc"],
   ["style", "Style rules", "Sty"],
   ["projects", "Projects", "Proj"],
 ];
@@ -647,6 +657,9 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
             {tab === "templates" && <TemplatesPanel onGenerate={onGenerateTemplate} />}
             {tab === "outline" && (
               <OutlinePanel shapes={diagram.shapes} lines={diagram.lines} onGenerate={onGenerateOutline} />
+            )}
+            {tab === "voice" && (
+              <VoicePanel shapes={diagram.shapes} lines={diagram.lines} onGenerate={onGenerateOutline} />
             )}
             {tab === "style" && <StyleRulesPanel rulesText={diagram.style_rules} onApply={onApplyStyleRules} />}
             {tab === "projects" && (
