@@ -20,6 +20,99 @@ interface Props {
   busy: boolean;
 }
 
+/** One connector being previewed while a shape is dragged. */
+interface EdgePreview {
+  g: SVGGElement;
+  path: SVGPathElement;
+  d: string;                    // original path, to restore on a non-move
+  pts: [number, number][];      // parsed original points
+  bothEnds: boolean;            // true when the whole edge moves with the shape
+  movesStart: boolean;
+  labels: SVGGraphicsElement[];
+}
+
+function parsePath(d: string): [number, number][] {
+  if (!d.startsWith("M") || /[aAcCqQsStTzZhHvV]/.test(d)) return [];
+  const out: [number, number][] = [];
+  for (const tok of d.slice(1).replace(/L/g, " ").trim().split(/\s+/)) {
+    const [a, b] = tok.split(",");
+    const x = Number(a), y = Number(b);
+    if (Number.isNaN(x) || Number.isNaN(y)) return [];
+    out.push([x, y]);
+  }
+  return out;
+}
+
+/** Edges that should follow `nodeId` — including any attached to its children,
+ *  since dragging a container carries everything inside it. */
+function collectEdgePreviews(svgEl: SVGSVGElement, nodeId: string): EdgePreview[] {
+  const moving = new Set<string>([nodeId]);
+  // descendants: walk the rendered groups nested inside this node's group
+  const own = svgEl.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`);
+  if (own) {
+    own.querySelectorAll("[data-node-id]").forEach((el) => {
+      const id = el.getAttribute("data-node-id");
+      if (id) moving.add(id);
+    });
+  }
+  const out: EdgePreview[] = [];
+  svgEl.querySelectorAll<SVGGElement>("[data-edge-id]").forEach((g) => {
+    const src = g.getAttribute("data-source") || "";
+    const tgt = g.getAttribute("data-target") || "";
+    const a = moving.has(src), b = moving.has(tgt);
+    if (!a && !b) return;
+    const path = g.querySelector("path");
+    if (!path) return;
+    const d = path.getAttribute("d") || "";
+    const pts = parsePath(d);
+    if (pts.length < 2) return;
+    out.push({
+      g,
+      path,
+      d,
+      pts,
+      bothEnds: a && b,
+      movesStart: a,
+      labels: Array.from(g.querySelectorAll<SVGGraphicsElement>("text, g")),
+    });
+  });
+  return out;
+}
+
+/** Redraw the previewed connectors for the current drag offset.
+ *
+ * This is drag feedback only — a straight rubber-band to the shape's new spot.
+ * It deliberately does not try to re-run the engine's routing: that stays the
+ * one place routes are computed, and it runs again on drop. */
+function applyEdgePreviews(previews: EdgePreview[], dx: number, dy: number) {
+  for (const p of previews) {
+    if (p.bothEnds) {
+      // whole connector travels with the shape — exact, so keep its real shape
+      p.g.setAttribute("transform", `translate(${dx},${dy})`);
+      continue;
+    }
+    const pts = p.pts;
+    const moved: [number, number] = p.movesStart
+      ? [pts[0][0] + dx, pts[0][1] + dy]
+      : [pts[pts.length - 1][0] + dx, pts[pts.length - 1][1] + dy];
+    const fixed = p.movesStart ? pts[pts.length - 1] : pts[0];
+    const [from, to] = p.movesStart ? [moved, fixed] : [fixed, moved];
+    p.path.setAttribute("d", `M${from[0].toFixed(0)},${from[1].toFixed(0)} L${to[0].toFixed(0)},${to[1].toFixed(0)}`);
+    // the caption's placement is stale the moment an end moves; hide it rather
+    // than leave it sitting next to a line that is no longer there
+    for (const el of p.labels) el.style.opacity = "0";
+  }
+}
+
+function restoreEdgePreviews(previews: EdgePreview[]) {
+  for (const p of previews) {
+    p.g.removeAttribute("transform");
+    p.path.setAttribute("d", p.d);
+    for (const el of p.labels) el.style.opacity = "";
+  }
+}
+
+const GRID_STEP = 20;   // world units between grid lines
 // The engine happily emits canvases a few thousand pixels wide, so the floor has
 // to go low enough that "fit to screen" can actually show one end to end.
 const MIN_ZOOM = 0.02;
@@ -60,6 +153,9 @@ export default function DiagramCanvas({
     origY: number;
     el: SVGGElement;
     shiftKey: boolean;
+    edges: EdgePreview[];
+    scaleX: number;
+    scaleY: number;
   } | null>(null);
   const panState = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(
     null
@@ -125,6 +221,11 @@ export default function DiagramCanvas({
       }
       const n = nodesRef.current.find((x) => x.id === id);
       if (!n) return;
+      // Measure the screen-to-diagram scale once. Doing it on every pointermove
+      // forced a layout of the whole SVG each frame, which is what made dragging
+      // a large diagram feel heavy.
+      const r0 = svgEl.getBoundingClientRect();
+      const vb0 = svgEl.viewBox.baseVal;
       dragState.current = {
         id,
         startClientX: ev.clientX,
@@ -133,6 +234,9 @@ export default function DiagramCanvas({
         origY: n.y,
         el: g,
         shiftKey: ev.shiftKey,
+        edges: collectEdgePreviews(svgEl, id),
+        scaleX: r0.width ? vb0.width / r0.width : 1,
+        scaleY: r0.height ? vb0.height / r0.height : 1,
       };
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerUp);
@@ -140,15 +244,11 @@ export default function DiagramCanvas({
 
     const onPointerMove = (ev: PointerEvent) => {
       const ds = dragState.current;
-      const svgNode = svgElRef.current;
-      if (!ds || !svgNode) return;
-      const rect = svgNode.getBoundingClientRect();
-      const vb = svgNode.viewBox.baseVal;
-      const scaleX = vb.width / rect.width;
-      const scaleY = vb.height / rect.height;
-      const dx = (ev.clientX - ds.startClientX) * scaleX;
-      const dy = (ev.clientY - ds.startClientY) * scaleY;
+      if (!ds) return;
+      const dx = (ev.clientX - ds.startClientX) * ds.scaleX;
+      const dy = (ev.clientY - ds.startClientY) * ds.scaleY;
       ds.el.setAttribute("transform", `translate(${dx},${dy})`);
+      applyEdgePreviews(ds.edges, dx, dy);
     };
 
     const onPointerUp = (ev: PointerEvent) => {
@@ -156,20 +256,20 @@ export default function DiagramCanvas({
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
       if (!ds) return;
-      const svgNode = svgElRef.current;
       dragState.current = null;
-      if (!svgNode) return;
-      const rect = svgNode.getBoundingClientRect();
-      const vb = svgNode.viewBox.baseVal;
-      const scaleX = vb.width / rect.width;
-      const scaleY = vb.height / rect.height;
-      const dx = (ev.clientX - ds.startClientX) * scaleX;
-      const dy = (ev.clientY - ds.startClientY) * scaleY;
-      ds.el.removeAttribute("transform");
+      const dx = (ev.clientX - ds.startClientX) * ds.scaleX;
+      const dy = (ev.clientY - ds.startClientY) * ds.scaleY;
       const moved = Math.abs(dx) > 2 || Math.abs(dy) > 2;
       if (moved) {
+        // Deliberately leave the dragged shape and its preview edges where the
+        // pointer left them. Snapping them back to the old position here made
+        // the drawing jump backwards and sit wrong until the server's re-render
+        // arrived, which is what read as lag. The whole SVG is replaced when
+        // that response lands, so this preview is discarded then.
         onDragEndRef.current(ds.id, ds.origX + dx, ds.origY + dy);
       } else {
+        ds.el.removeAttribute("transform");
+        restoreEdgePreviews(ds.edges);
         onSelectNodeRef.current(ds.id, ds.shiftKey);
       }
     };
@@ -455,10 +555,29 @@ export default function DiagramCanvas({
 
   const selectedSoleId = !selectedEdgeId && selectedNodeIds.length === 1 ? selectedNodeIds[0] : null;
 
+  // Grid drawn on the viewport itself rather than on the diagram, so it fills
+  // the whole area and keeps going wherever you pan — the drawing then reads as
+  // sitting on an endless surface instead of stopping at the edge of its page.
+  // Offsetting the pattern by the pan and scaling it by the zoom makes it move
+  // with the content, which is what sells the effect.
+  const gridSize = GRID_STEP * view.scale;
+  const gridStyle: React.CSSProperties =
+    gridSize >= 6
+      ? {
+          backgroundImage:
+            "linear-gradient(to right, var(--grid-line) 1px, transparent 1px)," +
+            "linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px)",
+          backgroundSize: `${gridSize}px ${gridSize}px`,
+          // keep the pattern anchored to the world origin as it pans
+          backgroundPosition: `${view.x}px ${view.y}px`,
+        }
+      : {}; // zoomed too far out — a grid this dense is just noise
+
   return (
     <div
       className="diagram-viewport"
       ref={viewportRef}
+      style={gridStyle}
       onPointerDown={onBgPointerDown}
       onDragOver={onDragOver}
       onDrop={onDrop}

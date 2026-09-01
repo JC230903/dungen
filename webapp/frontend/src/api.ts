@@ -205,6 +205,25 @@ export async function listSamples(): Promise<SampleInfo[]> {
   return r.data;
 }
 
+/** Download a sample workbook to disk.
+ *
+ * Goes through the API client rather than a plain link because every /api route
+ * needs the bearer token, which an <a href> can't send. The response is a blob
+ * we hand to a temporary link — the same approach the SVG/draw.io exports use.
+ */
+export async function downloadSample(name: string): Promise<void> {
+  const r = await client.get("/sample/download", {
+    params: { name },
+    responseType: "blob",
+  });
+  const url = URL.createObjectURL(r.data as Blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export async function getPalette(): Promise<PaletteResponse> {
   const r = await client.get<PaletteResponse>("/palette");
   return r.data;

@@ -22,7 +22,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from diagen.spec import Spec
@@ -464,8 +464,47 @@ def _relayout(session: Session):
     session.canvas_w, session.canvas_h = w, h
 
 
+# Room kept beyond the outermost shape so there is always somewhere to drag to.
+CANVAS_PAD = 240.0
+
+
+def _fit_canvas(session: Session) -> None:
+    """Grow the canvas so every shape stays on it, with room to spare.
+
+    Dragging a node only moved the node — the canvas kept whatever size the last
+    full layout produced, so anything pushed past the edge was simply clipped
+    and there was nowhere to drop a shape once you reached the border. This
+    expands to fit instead, and pulls content back in if a node is dragged off
+    the top or left (where growing alone can't help, since those edges are the
+    origin).
+    """
+    nodes = list(session.diagram.nodes.values())
+    if not nodes:
+        return
+    min_x = min(n.x for n in nodes)
+    min_y = min(n.y for n in nodes)
+    max_x = max(n.x + n.w for n in nodes)
+    max_y = max(n.y + n.h for n in nodes)
+
+    # Off the top/left: shift the whole drawing back into positive space. The
+    # diagram keeps its shape; only its origin moves.
+    dx = CANVAS_PAD - min_x if min_x < CANVAS_PAD / 4 else 0.0
+    dy = CANVAS_PAD - min_y if min_y < CANVAS_PAD / 4 else 0.0
+    if dx or dy:
+        for n in session.diagram.top_level():
+            _shift(n, dx, dy)
+        max_x += dx
+        max_y += dy
+
+    session.canvas_w = max(session.canvas_w, max_x + CANVAS_PAD)
+    session.canvas_h = max(session.canvas_h, max_y + CANVAS_PAD)
+
+
 def _build_response(session: Session, unknown_types: list[str] = None) -> DiagramResponse:
     spec, d = session.spec, session.diagram
+    # Every response goes through here, so this is the one place that guarantees
+    # the canvas is big enough for whatever the last edit did.
+    _fit_canvas(session)
     restore = _apply_style_rules_transient(d, session.style_rules) if session.style_rules else (lambda: None)
     try:
         renderer = SvgRenderer(spec)
@@ -624,6 +663,28 @@ def list_samples() -> list[SampleInfo]:
     # not samples and can't be opened, so they never belong in the picker.
     paths = sorted(p for p in SAMPLES_DIR.glob("*.xlsx") if not p.name.startswith("~$"))
     return [_sample_info(p) for p in paths]
+
+
+@app.get("/api/sample/download")
+def download_sample(name: str):
+    """Serve a sample workbook so people can open it in Excel and see how the
+    Nodes/Edges rows behind a diagram are actually written."""
+    # `name` comes from the query string: resolve it and confirm it really is a
+    # file directly inside samples/, so a crafted name can't walk out of it.
+    candidate = (SAMPLES_DIR / name).resolve()
+    try:
+        inside = candidate.parent == SAMPLES_DIR.resolve()
+    except OSError:
+        inside = False
+    if not inside or candidate.suffix.lower() != ".xlsx" or name.startswith("~$"):
+        raise HTTPException(400, "Not a valid sample name")
+    if not candidate.is_file():
+        raise HTTPException(404, f"No such sample: {name}")
+    return FileResponse(
+        candidate,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=candidate.name,
+    )
 
 
 @app.get("/api/palette", response_model=PaletteResponse)

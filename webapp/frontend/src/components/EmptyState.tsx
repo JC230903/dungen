@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { LineOut, SampleInfo, ShapeOut } from "../api";
-import { getPalette, listSamples, sampleLabel, sampleMeta } from "../api";
+import { downloadSample, getPalette, listSamples, sampleLabel, sampleMeta } from "../api";
 import TemplatesPanel from "./TemplatesPanel";
 import OutlinePanel from "./OutlinePanel";
 
@@ -88,6 +88,14 @@ export default function EmptyState({ onBlank, onSample, onUpload, onGenerateTemp
                   <button className="sample-item" onClick={() => onSample(s.name)} title={s.name}>
                     <span className="sample-name">{sampleLabel(s)}</span>
                     {sampleMeta(s) && <span className="sample-meta">{sampleMeta(s)}</span>}
+                  </button>
+                  <button
+                    className="sample-dl"
+                    title={`Download ${s.name} — open it in Excel to see the rows behind this diagram`}
+                    aria-label={`Download ${s.name}`}
+                    onClick={() => downloadSample(s.name).catch(() => {})}
+                  >
+                    ↓ .xlsx
                   </button>
                 </li>
               ))}

@@ -33,6 +33,24 @@ def _mid(pts):
     return (x1 + x2) / 2, (y1 + y2) / 2
 
 
+def _mid_seg(pts, wpx):
+    """Where to put a label, and whether to turn it to run along the line.
+
+    Anchors on the run's *middle* segment — the part of the connector a reader
+    associates with it. (Picking the longest segment instead put captions on
+    whichever riser happened to be longest, often far from either endpoint, and
+    turned nearly all of them on their side at once.)
+
+    Turning it is only worth it on a vertical segment with enough length to hold
+    the text; on a short one a rotated caption just sticks out past both ends.
+    """
+    seg = len(pts) // 2
+    (x1, y1), (x2, y2) = pts[seg - 1], pts[seg]
+    length = abs(x2 - x1) + abs(y2 - y1)
+    vertical = abs(x1 - x2) < abs(y1 - y2) and length >= wpx * 0.9
+    return (x1 + x2) / 2, (y1 + y2) / 2, vertical, length
+
+
 def _stable_hash(*parts) -> int:
     """Process-independent hash.
 
@@ -47,6 +65,108 @@ def _stable_hash(*parts) -> int:
 # edge keeps from a node box it passes.
 LANE_GAP = 9.0
 LANE_CLEAR = 5.0
+
+# How far a label may be nudged from its own line to dodge a neighbour. Beyond
+# this it stops looking like it belongs to that connector, which is worse than
+# a small overlap.
+LABEL_MAX_DRIFT = 26.0   # perpendicular to the line
+LABEL_SLIDE = 150.0      # along the line, where it stays clearly attached
+# Edge captions wrap instead of running as one long bar; these bound how narrow
+# or wide that block may get.
+LABEL_WRAP_MIN = 90.0
+LABEL_WRAP_MAX = 210.0
+LABEL_MAX_LINES = 3
+
+
+STUB = 8.0  # must match routing.CLEAR so the stub lands on a grid line
+
+
+def _stub(pt, n: Node):
+    """A point one clearance out from whichever face `pt` sits on.
+
+    Forcing a route to start and end at these keeps the first and last segment
+    perpendicular to the box face, so an arrowhead always points into the shape.
+    Returns None if the point isn't on a face (nothing sensible to anchor to).
+    """
+    x, y = pt
+    if abs(x - n.x) < 0.6:
+        return (n.x - STUB, y)
+    if abs(x - (n.x + n.w)) < 0.6:
+        return (n.x + n.w + STUB, y)
+    if abs(y - n.y) < 0.6:
+        return (x, n.y - STUB)
+    if abs(y - (n.y + n.h)) < 0.6:
+        return (x, n.y + n.h + STUB)
+    return None
+
+
+def _face_axis(pt, n: Node):
+    """Which axis a point can move along without leaving its box face."""
+    x, y = pt
+    if abs(x - n.x) < 0.6 or abs(x - (n.x + n.w)) < 0.6:
+        return "y"      # on a left/right face — slides vertically
+    if abs(y - n.y) < 0.6 or abs(y - (n.y + n.h)) < 0.6:
+        return "x"      # on a top/bottom face — slides horizontally
+    return None
+
+
+def _slide_on_face(pt, n: Node, off: float):
+    """Move an attachment point along the box face it sits on, staying on it.
+
+    Used to fan parallel connectors apart without lifting either end away from
+    its shape. Points not on a face are returned untouched.
+    """
+    x, y = pt
+    pad = 6.0
+    on_side = abs(x - n.x) < 0.6 or abs(x - (n.x + n.w)) < 0.6
+    on_tb = abs(y - n.y) < 0.6 or abs(y - (n.y + n.h)) < 0.6
+    if on_side:
+        lo, hi = n.y + pad, n.y + n.h - pad
+        return (x, min(max(y + off, lo), hi) if hi > lo else y)
+    if on_tb:
+        lo, hi = n.x + pad, n.x + n.w - pad
+        return (min(max(x + off, lo), hi) if hi > lo else x, y)
+    return pt
+
+
+def _simplify_pts(pts):
+    """Drop duplicate and collinear points so the path is bend-to-bend."""
+    out = []
+    for p in pts:
+        if not out or abs(p[0] - out[-1][0]) > 0.01 or abs(p[1] - out[-1][1]) > 0.01:
+            out.append(p)
+    i = 1
+    while i < len(out) - 1:
+        a, b, c = out[i - 1], out[i], out[i + 1]
+        if (abs(a[0] - b[0]) < 0.01 and abs(b[0] - c[0]) < 0.01) or \
+           (abs(a[1] - b[1]) < 0.01 and abs(b[1] - c[1]) < 0.01):
+            out.pop(i)
+        else:
+            i += 1
+    return out
+
+
+def _prefer_vertical(s: Node, t: Node) -> bool:
+    """Should this edge leave/arrive through the top-bottom faces?
+
+    The old test was simply "are the centres more than 10px apart vertically",
+    which sent almost every edge out of the bottom face — so two boxes sitting
+    side by side got an arrow that dropped out of one, ran along underneath, and
+    poked up into the other, instead of going straight across between their
+    facing sides.
+
+    What actually matters is which way round the boxes are separated: if their
+    vertical extents overlap they are side by side (go horizontal), if their
+    horizontal extents overlap they are stacked (go vertical), and when neither
+    or both overlap, follow whichever centre gap is larger.
+    """
+    overlap_y = s.y < t.y + t.h and t.y < s.y + s.h
+    overlap_x = s.x < t.x + t.w and t.x < s.x + s.w
+    if overlap_y and not overlap_x:
+        return False            # side by side — arrow should touch the side faces
+    if overlap_x and not overlap_y:
+        return True             # stacked — arrow should touch top/bottom faces
+    return abs(t.cy - s.cy) >= abs(t.cx - s.cx)
 
 
 class SvgRenderer:
@@ -76,15 +196,26 @@ class SvgRenderer:
         return mid
 
     # ---------- text ----------
-    def _text(self, x, y, lines, size=12, weight='normal', anchor='middle', color=TEXT):
+    def _text(self, x, y, lines, size=12, weight='normal', anchor='middle', color=TEXT,
+              halo=False, rotate=0, line_h=None):
+        """`halo` outlines the glyphs in white instead of sitting them on a solid
+        panel — the connector stays visible in the gaps between letters, where a
+        filled box used to blank out a chunk of it. `rotate` turns the text about
+        its own anchor, used to run a label along a vertical connector."""
         out = []
         total = len(lines)
-        y0 = y - (total - 1) * SZ.LINE_H / 2
+        lh = SZ.LINE_H if line_h is None else line_h
+        y0 = y - (total - 1) * lh / 2
+        extra = (' paint-order="stroke" stroke="#ffffff" stroke-width="3.5" '
+                 'stroke-linejoin="round"' if halo else '')
         for i, ln in enumerate(lines):
-            out.append(f'<text x="{x:.0f}" y="{y0 + i*SZ.LINE_H:.1f}" font-family="{FONT}" '
+            out.append(f'<text x="{x:.0f}" y="{y0 + i*lh:.1f}" font-family="{FONT}" '
                        f'font-size="{size}" font-weight="{weight}" fill="{color}" '
-                       f'text-anchor="{anchor}" dominant-baseline="middle">{escape(ln)}</text>')
-        return ''.join(out)
+                       f'text-anchor="{anchor}" dominant-baseline="middle"{extra}>{escape(ln)}</text>')
+        body = ''.join(out)
+        if rotate:
+            return f'<g transform="rotate({rotate} {x:.0f} {y:.0f})">{body}</g>'
+        return body
 
     # ---------- shapes ----------
     def _node_svg(self, n: Node) -> str:
@@ -248,12 +379,22 @@ class SvgRenderer:
         if not self._path_is_bad(pts, s, t):
             r.commit(pts)
             return None
-        routed = r.route(pts[0], pts[-1])
-        if not routed or len(routed) > 8:
+        # Route between stubs a short way out from each box face, not between the
+        # anchors themselves. Without this the search could arrive at, say, a
+        # left-hand face travelling upwards, leaving the arrowhead pointing along
+        # the box edge instead of into it.
+        a, b = pts[0], pts[-1]
+        sa, sb = _stub(a, s), _stub(b, t)
+        if sa is None or sb is None:
             r.commit(pts)
             return None
-        r.commit(routed)
-        return routed
+        routed = r.route(sa, sb)
+        if not routed or len(routed) > 10:
+            r.commit(pts)
+            return None
+        full = _simplify_pts([a] + routed + [b])
+        r.commit(full)
+        return full
 
     def _path_is_bad(self, pts, s, t):
         """True if this route crosses a box it shouldn't, or doubles up."""
@@ -358,7 +499,7 @@ class SvgRenderer:
             xr = max(s.x + s.w, t.x + t.w) + 50
             return [(s.x + s.w, s.cy), (xr, s.cy), (xr, t.cy), (t.x + t.w, t.cy)]
         dx, dy = t.cx - s.cx, t.cy - s.cy
-        if abs(dy) >= 10:  # different rows -> vertical routing (flow reads top-down)
+        if _prefer_vertical(s, t):
             if dy > 0:
                 p1, p2 = (s.cx, s.y + s.h), (t.cx, t.y)
             else:
@@ -402,15 +543,32 @@ class SvgRenderer:
                 my = self._plan_jog(d, eid, p1, p2, my)
             return [p1, (p1[0], my), (p2[0], my), p2]
         else:  # horizontal
+            # When the two boxes' vertical extents overlap, both ends can sit on
+            # one shared y and the connector is a single straight line. The old
+            # code left each end on its own centre and, if they were within 12px,
+            # joined them directly — which drew a shallow diagonal rather than a
+            # horizontal line whenever the centres didn't match exactly.
+            lo = max(s.y, t.y)
+            hi = min(s.y + s.h, t.y + t.h)
+            shared_y = (lo + hi) / 2 if hi - lo >= 4 else None
+            sy = shared_y if shared_y is not None else s.cy
+            ty = shared_y if shared_y is not None else t.cy
             if dx > 0:
-                p1, p2 = (s.x + s.w, s.cy), (t.x, t.cy)
+                p1, p2 = (s.x + s.w, sy), (t.x, ty)
             else:
-                p1, p2 = (s.x, s.cy), (t.x + t.w, t.cy)
-            if abs(p1[1] - p2[1]) < 12:
+                p1, p2 = (s.x, sy), (t.x + t.w, ty)
+            if abs(p1[1] - p2[1]) < 0.5:
                 bot = d and self._blocked(d, p1[0], p2[0], p1[1])
-                if bot:  # detour under the obstructing node(s)
+                if bot:
+                    # Dip under whatever sits between the two boxes, but keep both
+                    # ends on the side faces they started on. The previous version
+                    # moved them to the bottom faces instead, so a left-to-right
+                    # connection arrived pointing straight up into the underside of
+                    # its target.
                     yd = bot + 10
-                    return [(s.cx, s.y + s.h), (s.cx, yd), (t.cx, yd), (t.cx, t.y + t.h)]
+                    out_x = p1[0] + (STUB if dx > 0 else -STUB)
+                    in_x = p2[0] - (STUB if dx > 0 else -STUB)
+                    return [p1, (out_x, p1[1]), (out_x, yd), (in_x, yd), (in_x, p2[1]), p2]
                 return [p1, p2]
             mx = (p1[0] + p2[0]) / 2
             return [p1, (mx, p1[1]), (mx, p2[1]), p2]
@@ -427,8 +585,19 @@ class SvgRenderer:
         # edges elsewhere in the diagram); skip it here to avoid double-shifting.
         if par_n > 1 and not (e.sport or e.tport) and not fan:
             off = SZ.PAR_OFF * (par_idx - (par_n - 1) / 2) * 2
-            vertical = abs(pts[0][0] - pts[-1][0]) < abs(pts[0][1] - pts[-1][1])
-            pts = [(px + off, py) if vertical else (px, py + off) for px, py in pts]
+            # Which way the whole run shifts is decided by the faces the ends sit
+            # on, not by the run's overall aspect: an end on a top/bottom face can
+            # only slide sideways, one on a left/right face only up and down.
+            # Deciding this per-point (as an earlier version did) let an endpoint
+            # and its neighbour move on different axes, bending the last segment
+            # into a diagonal.
+            ax_s, ax_t = _face_axis(pts[0], s), _face_axis(pts[-1], t)
+            axis = ax_s or ax_t
+            if axis and (ax_t is None or ax_s is None or ax_s == ax_t):
+                shift = ((off, 0.0) if axis == "x" else (0.0, off))
+                mid = [(px + shift[0], py + shift[1]) for px, py in pts[1:-1]]
+                pts = ([_slide_on_face(pts[0], s, off)] + mid
+                       + [_slide_on_face(pts[-1], t, off)])
         if l.routing == 'straight' and 'route:' not in e.hint:
             pts = [pts[0], pts[-1]]
         else:
@@ -450,15 +619,15 @@ class SvgRenderer:
             attrs += f' marker-end="url(#{mt})"'
         out = [f'<path d="{path}" {attrs}/>']
         if e.label:
+            # A label on a vertical connector is turned to match it, so it takes a
+            # narrow column instead of a wide bar straddling the line.
             if 'near source' in l.label_pos:
-                lx, ly = pts[0][0] + 18, pts[0][1] + 14
+                vertical, lines = False, [e.label]
+                lx, ly = self._place_label(pts[0][0] + 18, pts[0][1] + 14, len(e.label) * 6 + 8)
             else:
-                lx, ly = _mid(pts)
-            wpx = len(e.label) * 6 + 8
-            lx, ly = self._place_label(lx, ly, wpx)
-            out.append(f'<rect x="{lx - wpx/2:.0f}" y="{ly - 9:.0f}" width="{wpx}" height="16" '
-                       f'fill="white" fill-opacity="0.9" rx="3"/>')
-            out.append(self._text(lx, ly, [e.label], 10.5, 'normal', 'middle', '#555555'))
+                lx, ly, lines, vertical = self._place_edge_label(pts, e.label)
+            out.append(self._text(lx, ly, lines, 10.5, 'normal', 'middle', '#555555',
+                                  halo=True, rotate=-90 if vertical else 0, line_h=13))
         return ''.join(out)
 
     def _edge_svg_arc(self, e: Edge, l, s: Node, t: Node) -> str:
@@ -488,40 +657,137 @@ class SvgRenderer:
             lx, ly = cx, top + 13
             wpx = len(e.label) * 6 + 8
             lx, ly = self._place_label(lx, ly, wpx)
-            out.append(f'<rect x="{lx - wpx/2:.0f}" y="{ly - 9:.0f}" width="{wpx}" height="16" '
-                       f'fill="white" fill-opacity="0.9" rx="3"/>')
-            out.append(self._text(lx, ly, [e.label], 10.5, 'normal', 'middle', '#555555'))
+            out.append(self._text(lx, ly, [e.label], 10.5, 'normal', 'middle', '#555555',
+                                  halo=True))
         return ''.join(out)
 
     # ---------- label collision avoidance ----------
-    def _place_label(self, lx, ly, wpx, h=16, pad=3):
-        """Search a small 2-D grid of nudges (closest first, both axes) until the
-        label clears previously placed labels AND node boxes. Searching sideways
-        as well as up/down finds free room in tight spots without needing a big
-        vertical excursion — which is what let labels drift far from their own
-        line in dense hub/bus areas. The search radius is capped either way so a
-        label can never end up looking disconnected from the line it belongs to."""
+    def _place_edge_label(self, pts, text):
+        """Choose where a connector's label goes, and how to shape it.
+
+        A label belongs at the middle of its line. When the middle happens to be
+        a corner there is no straight run to sit on, so the search walks outward
+        to the nearest straight stretch that is long enough — candidates too
+        close to a bend are skipped rather than allowed to straddle it.
+
+        The text is wrapped rather than set as one long bar: a two- or three-line
+        block is a fraction of the width, which is what actually lets several
+        captions share a crowded area instead of covering each other.
+
+        Returns (x, y, lines, vertical).
+        """
+        seglen = [abs(b[0] - a[0]) + abs(b[1] - a[1]) for a, b in zip(pts, pts[1:])]
+        total = sum(seglen) or 1.0
+        longest = max(seglen, default=0.0)
+
+        # Wrap to something near the run it has to sit on, within sane bounds.
+        target = min(max(longest * 0.85, LABEL_WRAP_MIN), LABEL_WRAP_MAX)
+        lines = SZ.wrap(text, target)
+        if len(lines) > LABEL_MAX_LINES:
+            # Too tall — set it wider rather than dropping words. Truncating here
+            # would silently lose part of what the diagram is meant to say.
+            lines = SZ.wrap(text, target * 1.7)
+        bw = max(len(s) for s in lines) * 6 + 8
+        bh = len(lines) * 13 + 4
+
+        # Work in whole straight runs. A label centred on the middle of a straight
+        # stretch reads as belonging to it; the same label parked at one end of
+        # that stretch drifts towards the neighbouring line's text instead. So
+        # each segment contributes its own centre first, and only if that exact
+        # spot is taken do we edge along the segment (never past its corners).
+        segs = []            # (rank, mid_x, mid_y, ux, uy, half_room, vertical)
+        walked = 0.0
+        for (a, b), L in zip(zip(pts, pts[1:]), seglen):
+            if L < 1:
+                walked += L
+                continue
+            vertical = abs(b[0] - a[0]) < abs(b[1] - a[1])
+            need = bh if vertical else bw
+            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            # how far the centre may shift before the block overhangs a corner
+            half_room = max(0.0, (L - need) / 2)
+            centre_pos = (walked + L / 2) / total
+            segs.append((abs(centre_pos - 0.5), mx, my, ux, uy, half_room,
+                         vertical and L >= need * 0.95, L, need))
+            walked += L
+        if not segs:
+            mx, my = _mid(pts)
+            segs = [(0.0, mx, my, 1.0, 0.0, 0.0, False, 0.0, 0.0)]
+        # the straight run whose own centre is nearest the middle of the whole
+        # connector wins; ties and crowding fall through to the next one
+        segs.sort(key=lambda s: (s[0], -s[7]))
+
+        def overlaps(p, q):
+            return p[0] < q[2] and p[2] > q[0] and p[1] < q[3] and p[3] > q[1]
+
+        pad = 3
+
+        def box_for(cx, cy, vert):
+            w, h = (bh, bw) if vert else (bw, bh)
+            return [cx - w / 2 - pad, cy - h / 2 - pad, cx + w / 2 + pad, cy + h / 2 + pad]
+
+        # pass 1: dead centre of each straight run, longest/most central first
+        for _, mx, my, ux, uy, half_room, vert, L, need in segs:
+            if L < need * 0.6:
+                continue                     # this run is far too short for the block
+            box = box_for(mx, my, vert)
+            if not any(overlaps(box, r) for r in self.label_rects):
+                self.label_rects.append(box)
+                return mx, my, lines, vert
+        # pass 2: shift along the run, staying inside it, then a small step off it
+        for off in (0.0, 15.0, -15.0, 27.0, -27.0):
+            for _, mx, my, ux, uy, half_room, vert, L, need in segs:
+                slide = 0.0
+                while slide <= half_room:
+                    for s in ((slide, -slide) if slide else (0.0,)):
+                        cx = mx + ux * s + (off if vert else 0.0)
+                        cy = my + uy * s + (0.0 if vert else off)
+                        box = box_for(cx, cy, vert)
+                        if not any(overlaps(box, r) for r in self.label_rects):
+                            self.label_rects.append(box)
+                            return cx, cy, lines, vert
+                    slide += 14.0
+        # Nowhere clear — sit on the most central run and accept the overlap.
+        _, mx, my, _, _, _, vert, _, _ = segs[0]
+        self.label_rects.append(box_for(mx, my, vert))
+        return mx, my, lines, vert
+
+    def _place_label(self, lx, ly, w, h=16, pad=3, along="x", slide=None):
+        """Nudge a label off its neighbours, without letting it leave its line.
+
+        The nudge steps used to be derived from the label's own width, so a long
+        caption stepped hundreds of pixels at a time and could be flung right
+        across the drawing, ending up nowhere near the connector it names. Steps
+        are now small and fixed, and the total displacement is hard-capped: if
+        nothing clear is found nearby the label simply stays put. Since labels
+        are drawn with a halo rather than an opaque panel, a slight overlap
+        reads far better than a caption parked next to the wrong line.
+        """
         def overlaps(a, b):
             return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
 
         def box_at(cx, cy):
-            return [cx - wpx / 2 - pad, cy - h / 2 - pad, cx + wpx / 2 + pad, cy + h / 2 + pad]
-        step_y = h + 2
-        step_x = max(wpx * 0.55, 40)
-        offsets = sorted(
-            {(dxm, dym) for dym in range(-4, 5) for dxm in range(-3, 4)},
-            key=lambda o: (o[0] * step_x) ** 2 + (o[1] * step_y) ** 2)
-        best = None
-        for dxm, dym in offsets:
-            cx, cy = lx + dxm * step_x, ly + dym * step_y
+            return [cx - w / 2 - pad, cy - h / 2 - pad, cx + w / 2 + pad, cy + h / 2 + pad]
+
+        # Sliding a label *along* its own connector keeps it obviously attached to
+        # it, so there is plenty of room to move that way; stepping away from the
+        # line is what makes a caption look orphaned, so that stays tight.
+        step = 11.0
+        n_along = int(min(LABEL_SLIDE if slide is None else slide, LABEL_SLIDE) / step)
+        n_off = int(LABEL_MAX_DRIFT / step)
+        pairs = [(a, o) for a in range(-n_along, n_along + 1) for o in range(-n_off, n_off + 1)]
+        # nearest first, and strongly preferring movement along the line
+        pairs.sort(key=lambda p: p[0] * p[0] + p[1] * p[1] * 9)
+        for a, o in pairs:
+            dx, dy = (a, o) if along == "x" else (o, a)
+            cx, cy = lx + dx * step, ly + dy * step
             box = box_at(cx, cy)
             if not any(overlaps(box, r) for r in self.label_rects):
-                best = (cx, cy, box)
-                break
-        if best is None:  # nothing clear found in the search grid; fall back as-is
-            best = (lx, ly, box_at(lx, ly))
-        lx, ly, box = best
-        self.label_rects.append(box)
+                self.label_rects.append(box)
+                return cx, cy
+        # Nowhere clear within reach — keep it on its own line and accept the overlap.
+        self.label_rects.append(box_at(lx, ly))
         return lx, ly
 
     # ---------- diagram ----------
@@ -594,6 +860,11 @@ class SvgRenderer:
                                    fan=fan_of(e), twin=twin, eid=e.id, plan=False)
             terminals.append(pts[0])
             terminals.append(pts[-1])
+            # the stubs the router actually searches between must be on the grid too
+            for anchor, node in ((pts[0], s), (pts[-1], t)):
+                st = _stub(anchor, node)
+                if st is not None:
+                    terminals.append(st)
         router.set_terminals(terminals)
         # A very dense diagram makes the channel grid too big to A* quickly;
         # there the simple routes stand on their own rather than stalling.

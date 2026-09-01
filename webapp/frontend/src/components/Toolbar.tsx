@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DiagramInfo, SampleInfo } from "../api";
-import { listSamples, sampleLabel, sampleMeta } from "../api";
+import { downloadSample, listSamples, sampleLabel, sampleMeta } from "../api";
 import ShortcutsHelp from "./ShortcutsHelp";
 
 export type Tool = "select" | "connect";
@@ -13,6 +13,7 @@ interface Props {
   error: string | null;
   onDismissError: () => void;
   source: string | null;
+  sourceSample: string | null;
   nodeCount: number;
   edgeCount: number;
   diagrams: DiagramInfo[];
@@ -61,6 +62,7 @@ export default function Toolbar({
   error,
   onDismissError,
   source,
+  sourceSample,
   nodeCount,
   edgeCount,
   diagrams,
@@ -234,9 +236,19 @@ export default function Toolbar({
           <>
             {title && <span className="title-name">{title}</span>}
             {hasDiagram && source && (
-              <span className="title-source" title={source}>
-                {source}
-              </span>
+              sourceSample ? (
+                <button
+                  className="title-source title-source-link"
+                  title={`Download ${sourceSample}`}
+                  onClick={() => downloadSample(sourceSample).catch(() => {})}
+                >
+                  {source} ↓
+                </button>
+              ) : (
+                <span className="title-source" title={source}>
+                  {source}
+                </span>
+              )
             )}
             {hasDiagram && (
               <span className="title-stats">

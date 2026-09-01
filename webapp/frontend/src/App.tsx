@@ -98,6 +98,10 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
   // The API response only carries the diagram itself, so provenance is tracked
   // here at the point of loading.
   const [source, setSource] = useState<string | null>(null);
+  // Set only when the diagram came from a bundled sample, which is the one
+  // source whose workbook still exists on the server and can be handed back.
+  // An uploaded file was parsed and discarded; a template/outline never had one.
+  const [sourceSample, setSourceSample] = useState<string | null>(null);
   const diagramRef = useRef(diagram);
   diagramRef.current = diagram;
 
@@ -127,9 +131,11 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
 
   // `after` fires once the new diagram is in state — used by project-load to
   // re-attach the project id/name once loading actually succeeds.
-  const runLoad = useCallback((p: Promise<DiagramResponse>, sourceLabel: string | null = null, after?: (d: DiagramResponse) => void) => {
+  const runLoad = useCallback((p: Promise<DiagramResponse>, sourceLabel: string | null = null,
+                               after?: (d: DiagramResponse) => void, sampleName: string | null = null) => {
     setLoading(true);
     setSource(sourceLabel);
+    setSourceSample(sampleName);
     setError(null);
     setSelectedNodeIds([]);
     setSelectedEdgeId(null);
@@ -166,15 +172,18 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
     (file: File) => runLoad(uploadWorkbook(file), `Uploaded: ${file.name}`),
     [runLoad]
   );
-  const onSample = useCallback((name: string) => runLoad(loadSample(name), `Sample: ${name}`), [runLoad]);
+  const onSample = useCallback(
+    (name: string) => runLoad(loadSample(name), `Sample: ${name}`, undefined, name),
+    [runLoad]
+  );
   const onBlank = useCallback(() => runLoad(createBlank(), "Blank canvas"), [runLoad]);
   const onSwitchDiagram = useCallback(
     (id: string) => {
       if (!diagram) return;
       // Switching sheets inside the same workbook doesn't change where it came from.
-      runLoad(switchDiagram(diagram.session_id, id), source);
+      runLoad(switchDiagram(diagram.session_id, id), source, undefined, sourceSample);
     },
-    [diagram, runLoad, source]
+    [diagram, runLoad, source, sourceSample]
   );
 
   // ---------- saved projects ----------
@@ -539,6 +548,7 @@ function DiagramApp({ username, onLogout }: { username: string; onLogout: () => 
         error={error}
         onDismissError={() => setError(null)}
         source={source}
+        sourceSample={sourceSample}
         nodeCount={diagram?.nodes.length ?? 0}
         edgeCount={diagram?.edges.length ?? 0}
         diagrams={diagram?.diagrams ?? []}
