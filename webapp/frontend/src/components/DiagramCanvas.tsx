@@ -504,11 +504,20 @@ export default function DiagramCanvas({
     setView((v) => ({ ...v, x: (m.vw - m.sw * v.scale) / 2, y: (m.vh - m.sh * v.scale) / 2 }));
   };
 
-  /** Back to 1:1, centred — the "actual size" command. */
+  /** Back to 1:1 — the "actual size" command.
+   *
+   * Centred while the drawing fits, but anchored to its top-left corner once it
+   * is larger than the viewport: centring an over-wide diagram pushes both
+   * edges off screen at once and opens you in the middle of it, with no way to
+   * tell which direction the start is in. */
   const resetZoom = () => {
     const m = measure();
     if (!m) return setView({ x: 0, y: 0, scale: 1 });
-    setView({ scale: 1, x: (m.vw - m.sw) / 2, y: (m.vh - m.sh) / 2 });
+    setView({
+      scale: 1,
+      x: m.sw <= m.vw ? (m.vw - m.sw) / 2 : FIT_PADDING,
+      y: m.sh <= m.vh ? (m.vh - m.sh) / 2 : FIT_PADDING,
+    });
   };
 
   const zoomBy = (f: number) => {
@@ -520,15 +529,19 @@ export default function DiagramCanvas({
     zoomAt(f, cx, cy);
   };
 
-  // Open a diagram already framed instead of pinned to its top-left corner at
-  // 100% — on the big generated canvases that showed a mostly-empty corner. This
-  // fires once per mount, and App remounts the canvas (via a key on the diagram
-  // id) when a different diagram loads, so an edit never yanks the view.
+  // Open at actual size, centred. Shapes and type are sized in real pixels by
+  // the engine, so 1:1 is the only zoom at which what you see matches what gets
+  // exported — auto-fitting used to open a wide diagram at ~60%, where the
+  // labels the engine had carefully spaced were too small to read. A diagram
+  // too big for the viewport is centred on its middle rather than pinned to a
+  // corner, and Fit is one click away. This fires once per mount, and App
+  // remounts the canvas (via a key on the diagram id) when a different diagram
+  // loads, so an edit never yanks the view.
   const didFit = useRef(false);
   useEffect(() => {
     if (didFit.current || !svgElRef.current) return;
     didFit.current = true;
-    fitToScreen();
+    resetZoom();
   }, [svg]);
 
   // ---------- drop a palette shape onto the canvas ----------

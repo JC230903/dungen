@@ -18,6 +18,12 @@ import heapq
 from bisect import bisect_left
 
 CLEAR = 8.0          # gap kept between an edge and a box it passes
+# A run that lands exactly on a box face is not "outside" it to a reader — it
+# reads as touching that shape, which makes it ambiguous which box the line is
+# actually connected to. Edge endpoints sit on faces and are registered as grid
+# lines, so without this margin A* was free to send long runs straight down a
+# box's edge. Kept well below CLEAR so the real corridors stay usable.
+GRAZE = 1.0
 TURN_COST = 26.0     # discourages staircases; a straight run reads better
 REUSE_COST = 45.0    # per shared bucket of an existing run
 LANE_TOL = 7.0       # two runs closer than this read as one line
@@ -92,14 +98,14 @@ class Router:
     def _blocked_h(self, y, xa, xb):
         lo, hi = (xa, xb) if xa <= xb else (xb, xa)
         for x1, y1, x2, y2 in self.boxes:
-            if y1 < y < y2 and x1 < hi and x2 > lo:
+            if y1 - GRAZE < y < y2 + GRAZE and x1 < hi and x2 > lo:
                 return True
         return False
 
     def _blocked_v(self, x, ya, yb):
         lo, hi = (ya, yb) if ya <= yb else (yb, ya)
         for x1, y1, x2, y2 in self.boxes:
-            if x1 < x < x2 and y1 < hi and y2 > lo:
+            if x1 - GRAZE < x < x2 + GRAZE and y1 < hi and y2 > lo:
                 return True
         return False
 
@@ -123,14 +129,14 @@ class Router:
             iy_lo = bisect_left(ys, y1)
             iy_hi = bisect_left(ys, y2)
             for iy in range(ny):
-                if not (y1 < ys[iy] < y2):
+                if not (y1 - GRAZE < ys[iy] < y2 + GRAZE):
                     continue
                 row = hblk[iy]
                 for i in range(max(0, ix_lo - 1), min(len(row), ix_hi + 1)):
                     if xs[i] < x2 and xs[i + 1] > x1:
                         row[i] = 1
             for ix in range(nx):
-                if not (x1 < xs[ix] < x2):
+                if not (x1 - GRAZE < xs[ix] < x2 + GRAZE):
                     continue
                 col = vblk[ix]
                 for i in range(max(0, iy_lo - 1), min(len(col), iy_hi + 1)):

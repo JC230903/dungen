@@ -176,6 +176,7 @@ class SvgRenderer:
         self._obst = None
         self._lanes_used = []
         self._router = None
+        self._edge_segs = []
 
     # ---------- markers ----------
     def _marker(self, end: str, color: str) -> str:
@@ -580,11 +581,18 @@ class SvgRenderer:
             mx = (p1[0] + p2[0]) / 2
             return [p1, (mx, p1[1]), (mx, p2[1]), p2]
 
-    def _edge_svg(self, e: Edge, d: Diagram, par_idx=0, par_n=1, fan=None) -> str:
+    def _edge_geom(self, e: Edge, d: Diagram, par_idx=0, par_n=1, fan=None):
+        """Final drawn geometry for one edge, with no label placed yet.
+
+        Labels are positioned in a second pass over the whole diagram, so the
+        routing decided here — which commits corridors to the shared router in
+        edge order — has to be settled for *every* edge before the first
+        caption is placed. Returns None for arc edges, which draw themselves.
+        """
         l = self.spec.line_of(e)
         s, t = d.nodes[e.source], d.nodes[e.target]
         if 'route:arc-top' in e.hint:
-            return self._edge_svg_arc(e, l, s, t)
+            return None
         twin = (par_idx, par_n) if par_n > 1 else None
         pts = self._anchor_pts(s, t, e.hint, d, e.sport, e.tport, fan=fan, twin=twin, eid=e.id)
         # SZ-12 old parallel offset: only needed when the newer fan/twin spread
@@ -613,6 +621,9 @@ class SvgRenderer:
             routed = self._route_around(pts, s, t, e)
             if routed:
                 pts = routed
+        return l, pts
+
+    def _edge_svg(self, e: Edge, l, pts) -> str:
         path = 'M' + ' L'.join(f'{px:.0f},{py:.0f}' for px, py in pts)
         dash = DASH.get(l.style)
         attrs = f'stroke="{l.color}" stroke-width="{l.width}" fill="none"'
@@ -632,7 +643,7 @@ class SvgRenderer:
                 vertical, lines = False, [e.label]
                 lx, ly = self._place_label(pts[0][0] + 18, pts[0][1] + 14, len(e.label) * 6 + 8)
             else:
-                lx, ly, lines, vertical = self._place_edge_label(pts, e.label)
+                lx, ly, lines, vertical = self._place_edge_label(pts, e.label, e.id)
             out.append(self._text(lx, ly, lines, 10.5, 'normal', 'middle', '#555555',
                                   halo=True, rotate=-90 if vertical else 0, line_h=13))
         return ''.join(out)
@@ -669,7 +680,7 @@ class SvgRenderer:
         return ''.join(out)
 
     # ---------- label collision avoidance ----------
-    def _place_edge_label(self, pts, text):
+    def _place_edge_label(self, pts, text, own_id=None):
         """Choose where a connector's label goes, and how to shape it.
 
         A label belongs at the middle of its line. When the middle happens to be
@@ -693,7 +704,13 @@ class SvgRenderer:
         if len(lines) > LABEL_MAX_LINES:
             # Too tall — set it wider rather than dropping words. Truncating here
             # would silently lose part of what the diagram is meant to say.
-            lines = SZ.wrap(text, target * 1.7)
+            wide = SZ.wrap(text, target * 1.7)
+            # ...but only when the wider block still fits the run it has to sit
+            # on. Between two boxes a hundred pixels apart, widening pushed the
+            # caption out over the shapes on either side; there a taller,
+            # narrower block is what keeps it inside the corridor.
+            if max(len(s) for s in wide) * 6 + 8 <= max(longest, LABEL_WRAP_MIN):
+                lines = wide
         bw = max(len(s) for s in lines) * 6 + 8
         bh = len(lines) * 13 + 4
 
@@ -744,31 +761,70 @@ class SvgRenderer:
             w, h = (bh, bw) if vert else (bw, bh)
             return [cx - w / 2 - pad, cy - h / 2 - pad, cx + w / 2 + pad, cy + h / 2 + pad]
 
-        # pass 1: dead centre of each straight run, longest/most central first
-        for _, mx, my, ux, uy, half_room, vert, L, need in segs:
-            if L < need * 0.6:
+        def area(p, q):
+            return (max(0.0, min(p[2], q[2]) - max(p[0], q[0]))
+                    * max(0.0, min(p[3], q[3]) - max(p[1], q[1])))
+
+        def crossings(box):
+            """How many *other* connectors run under this block.
+
+            A caption sitting across four unrelated lines is the single worst
+            kind of clutter, and it is invisible to an overlap-only test because
+            a stroke has no rectangle of its own.
+            """
+            n = 0
+            for (eid, sx1, sy1, sx2, sy2) in self._edge_segs:
+                if eid == own_id:
+                    continue
+                if box[0] < sx2 and box[2] > sx1 and box[1] < sy2 and box[3] > sy1:
+                    n += 1
+            return n
+
+        # Score every candidate rather than taking the first clear one and, on a
+        # crowded diagram, giving up and stacking the caption on a node box.
+        # Weights are ordered so the search will always trade a long slide along
+        # its own line for not covering a shape or another caption.
+        best = None
+        for rank, (_, mx, my, ux, uy, half_room, vert, L, need) in enumerate(segs):
+            if L < need * 0.55:
                 continue                     # this run is far too short for the block
-            box = box_for(mx, my, vert)
-            if not any(overlaps(box, r) for r in self.label_rects):
-                self.label_rects.append(box)
-                return mx, my, lines, vert
-        # pass 2: shift along the run, staying inside it, then a small step off it
-        for off in (0.0, 15.0, -15.0, 27.0, -27.0):
-            for _, mx, my, ux, uy, half_room, vert, L, need in segs:
-                slide = 0.0
-                while slide <= half_room:
-                    for s in ((slide, -slide) if slide else (0.0,)):
-                        cx = mx + ux * s + (off if vert else 0.0)
-                        cy = my + uy * s + (0.0 if vert else off)
-                        box = box_for(cx, cy, vert)
-                        if not any(overlaps(box, r) for r in self.label_rects):
-                            self.label_rects.append(box)
-                            return cx, cy, lines, vert
-                    slide += 14.0
-        # Nowhere clear — sit on the most central run and accept the overlap.
-        _, mx, my, _, _, _, vert, _, _ = segs[0]
-        self.label_rects.append(box_for(mx, my, vert))
-        return mx, my, lines, vert
+            reach = max(half_room, L / 2)
+            slides = [0.0]
+            step = 14.0
+            k = 1
+            while step * k <= reach:
+                slides += [step * k, -step * k]
+                k += 1
+            for off in (0.0, 15.0, -15.0, 27.0, -27.0, 40.0, -40.0):
+                for s in slides:
+                    cx = mx + ux * s + (off if vert else 0.0)
+                    cy = my + uy * s + (0.0 if vert else off)
+                    box = box_for(cx, cy, vert)
+                    # Covering a shape or another caption makes text unreadable,
+                    # so it has to outrank everything else by a wide margin. A
+                    # line crossing under a haloed caption is only untidy, and
+                    # its weight is capped so a congested area can never make
+                    # "sit on top of that box" look like the cheaper option.
+                    cost = (4000.0 * sum(1 for r in self.label_rects if overlaps(box, r))
+                            + 0.2 * sum(area(box, r) for r in self.label_rects)
+                            + 9.0 * min(crossings(box), 8)
+                            + 1.5 * abs(s) + 2.5 * abs(off)
+                            + 25.0 * rank
+                            + (0.0 if abs(s) <= half_room else 45.0))
+                    if best is None or cost < best[0]:
+                        best = (cost, cx, cy, vert, box)
+                    if cost == 0.0:
+                        break
+                if best and best[0] == 0.0:
+                    break
+            if best and best[0] == 0.0:
+                break
+        if best is None:
+            _, mx, my, _, _, _, vert, _, _ = segs[0]
+            best = (0.0, mx, my, vert, box_for(mx, my, vert))
+        _, cx, cy, vert, box = best
+        self.label_rects.append(box)
+        return cx, cy, lines, vert
 
     def _place_label(self, lx, ly, w, h=16, pad=3, along="x", slide=None):
         """Nudge a label off its neighbours, without letting it leave its line.
@@ -815,6 +871,7 @@ class SvgRenderer:
         self._obst = None
         self._lanes_used = []
         self._router = None
+        self._edge_segs = []
         # Seed with every leaf node's box (shrunk slightly) so edge labels steer
         # clear of boxes too, not just other labels. Containers are excluded —
         # they're just background panels, labels are expected to sit on them.
@@ -887,12 +944,30 @@ class SvgRenderer:
         # there the simple routes stand on their own rather than stalling.
         self._router = router if router.usable() else None
 
+        # Phase 1 — settle every edge's geometry. Captions are placed only once
+        # all of it is known, so a label can be steered off lines that had not
+        # been drawn yet when its own edge was rendered.
+        geoms = {}
         for e in d.edges:
             grp = pairs[frozenset((e.source, e.target))]
-            fan = fan_of(e)
+            geoms[e.id] = self._edge_geom(e, d, grp.index(e), len(grp), fan=fan_of(e))
+        self._edge_segs = []
+        for eid, g in geoms.items():
+            if not g:
+                continue
+            for (p, q) in zip(g[1], g[1][1:]):
+                self._edge_segs.append((eid, min(p[0], q[0]) - 1, min(p[1], q[1]) - 1,
+                                        max(p[0], q[0]) + 1, max(p[1], q[1]) + 1))
+        # Phase 2 — draw, placing each caption against the finished picture.
+        for e in d.edges:
+            g = geoms[e.id]
+            if g is None:
+                inner = self._edge_svg_arc(e, self.spec.line_of(e),
+                                           d.nodes[e.source], d.nodes[e.target])
+            else:
+                inner = self._edge_svg(e, g[0], g[1])
             body.append(f'<g data-edge-id="{escape(e.id)}" data-source="{escape(e.source)}" '
-                        f'data-target="{escape(e.target)}">'
-                        + self._edge_svg(e, d, grp.index(e), len(grp), fan=fan) + '</g>')
+                        f'data-target="{escape(e.target)}">' + inner + '</g>')
         for _, n in leaves:
             body.append(f'<g data-node-id="{escape(n.id)}">' + self._node_svg(n) + '</g>')
         title = (f'<text x="{SZ.MARGIN}" y="{SZ.MARGIN - 8}" font-family="{FONT}" font-size="16" '
