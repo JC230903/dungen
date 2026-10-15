@@ -55,8 +55,10 @@ cd webapp/backend
 python -m pytest -q
 ```
 
-This change was checked with 9 frontend tests and all 73 backend tests passing.
-Browser checks used an isolated temporary database, not existing saved projects:
+The UI-only branch based on the upstream repository was checked with 9 frontend
+tests and all 72 backend tests passing. The original fork also passed its 73-test
+backend suite, which included the separate Excel-cleanup regression test.
+The original UI browser checks used an isolated temporary database, not existing saved projects:
 
 - Login and starting screen render without console errors.
 - Shape search, creation, label editing, undo, redo, and project saving work.
